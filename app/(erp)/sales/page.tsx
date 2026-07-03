@@ -20,6 +20,7 @@ const statusConfig: Record<InvoiceStatus, { label: string; color: string; bg: st
   overdue: { label: 'Overdue', color: 'text-red-600', bg: 'bg-red-100' },
   cancelled: { label: 'Cancelled', color: 'text-gray-600', bg: 'bg-gray-100' },
   refunded: { label: 'Refunded', color: 'text-purple-600', bg: 'bg-purple-100' },
+  refundable: { label: 'Refundable', color: 'text-teal-600', bg: 'bg-teal-100' },
 };
 
 interface InvoiceWithCustomer extends Omit<Invoice, 'customer'> {
@@ -247,7 +248,12 @@ export default function SalesPage() {
   const filtered = invoices.filter(i => {
     // Basic filters
     if (search && !i.invoice_number.toLowerCase().includes(search.toLowerCase()) && !i.customer?.name?.toLowerCase().includes(search.toLowerCase())) return false;
-    if (filterStatus && i.status !== filterStatus) return false;
+    // Special handling for refundable filter - shows paid/partially_paid invoices that can be refunded
+    if (filterStatus === 'refundable') {
+      if (i.status !== 'paid' && i.status !== 'partially_paid') return false;
+    } else if (filterStatus && i.status !== filterStatus) {
+      return false;
+    }
     if (filterPaymentMethod && (!i.payments || !i.payments.some(p => p.payment_method === filterPaymentMethod))) return false;
 
     // Advanced filters

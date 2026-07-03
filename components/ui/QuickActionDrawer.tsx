@@ -145,7 +145,7 @@ export default function QuickActionDrawer() {
         />
       )}
 
-      {/* Slim Side Tab Trigger */}
+      {/* Side Tab Trigger */}
       <button
         ref={triggerRef}
         onClick={() => setIsOpen(!isOpen)}
@@ -160,12 +160,12 @@ export default function QuickActionDrawer() {
           ${isOpen
             ? 'w-12 h-12 rounded-full bg-slate-800 mr-3'
             : isMobile
-              ? 'w-8 h-20 rounded-l-xl'
-              : 'w-2 hover:w-8 h-32 rounded-l-xl'
+              ? 'w-6 h-14 rounded-l-lg'
+              : 'w-6 hover:w-10 h-28 rounded-l-xl'
           }
-          bg-gradient-to-l from-blue-600 to-blue-700
-          hover:from-blue-500 hover:to-blue-600
-          shadow-lg shadow-blue-500/20
+          bg-gradient-to-l from-slate-700 to-slate-800
+          hover:from-slate-600 hover:to-slate-700
+          shadow-lg shadow-slate-900/30
           flex items-center justify-center
           group
         `}
@@ -175,17 +175,24 @@ export default function QuickActionDrawer() {
           <X className="w-5 h-5 text-white" />
         ) : (
           <div className="flex items-center justify-center h-full">
-            {/* Vertical text indicator */}
-            <div className="flex flex-col items-center gap-1 py-2">
-              <Zap className={`w-3.5 h-3.5 text-white ${isMobile ? '' : 'opacity-80 group-hover:opacity-100'}`} />
-              <ChevronLeft className={`w-4 h-4 text-white ${isMobile ? '' : 'opacity-60 group-hover:opacity-100'}`} />
-            </div>
+            {/* Arrow indicator pointing left */}
+            <svg
+              className={`w-4 h-4 text-white transition-opacity ${isMobile ? '' : 'opacity-90 group-hover:opacity-100'}`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
           </div>
         )}
 
         {/* Subtle glow */}
         {!isOpen && !isMobile && (
-          <span className="absolute inset-0 rounded-l-xl bg-blue-400/20 animate-pulse" />
+          <span className="absolute inset-0 rounded-l-xl bg-slate-400/20 animate-pulse" />
         )}
       </button>
 

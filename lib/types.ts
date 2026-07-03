@@ -226,7 +226,8 @@ export type InvoiceStatus =
   | 'paid'
   | 'overdue'
   | 'cancelled'
-  | 'refunded';
+  | 'refunded'
+  | 'refundable';
 
 export interface Invoice {
   id: string;
