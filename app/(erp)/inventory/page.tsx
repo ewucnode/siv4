@@ -154,7 +154,7 @@ export default function InventoryPage() {
     );
     const matchColor = !filterColor || p.product_colors?.some(c => c.name === filterColor);
     const matchSize = !filterSize || p.product_sizes?.some(s => s.name === filterSize);
-    const matchUnit = !filterUnit || p.unit === filterUnit;
+    const matchUnit = !filterUnit || (p.unit && p.unit.toLowerCase() === filterUnit.toLowerCase());
     return matchSearch && matchCat && matchBrand && matchWarehouse && matchStatus && matchColor && matchSize && matchUnit;
   });
 
@@ -392,7 +392,7 @@ export default function InventoryPage() {
                     <td className="px-4 py-3 text-right">
                       <div className="group relative">
                         <span className={`text-sm font-bold cursor-help ${(p.total_stock || 0) === 0 ? 'text-red-500' : (p.total_stock || 0) <= p.min_stock_level ? 'text-amber-500' : 'text-foreground'}`}>
-                          {p.total_stock || 0} <span className="text-xs font-normal text-muted-foreground">{p.unit || 'pcs'}</span>
+                          {p.total_stock || 0}
                         </span>
                         <div className="absolute right-0 top-full mt-1 bg-white border border-border rounded-lg shadow-lg p-3 z-10 hidden group-hover:block min-w-[180px]">
                           <p className="text-xs font-semibold mb-2 text-foreground">Stock by Location:</p>
@@ -1831,6 +1831,9 @@ function ManageCatalogModal({ categories, brands, unitTypes, onClose, onSaved }:
   const [parentCategory, setParentCategory] = useState('');
   const [saving, setSaving] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
+  const [editingShort, setEditingShort] = useState('');
 
   const parentCategories = categories.filter(c => !c.parent_id);
   const subCategories = categories.filter(c => c.parent_id);
@@ -1846,13 +1849,25 @@ function ManageCatalogModal({ categories, brands, unitTypes, onClose, onSaved }:
     setExpandedCategories(newExpanded);
   }
 
+  function startEdit(id: string, name: string, short?: string) {
+    setEditingId(id);
+    setEditingName(name);
+    setEditingShort(short || '');
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditingName('');
+    setEditingShort('');
+  }
+
   async function handleAdd() {
     if (!newName.trim()) return;
     if (tab === 'units' && !newShort.trim()) return;
     setSaving(true);
 
     if (tab === 'units') {
-      const { error } = await supabase.from('unit_types').insert({ unit_name: newName.trim(), unit_short: newShort.trim().toLowerCase(), is_active: true });
+      const { error } = await supabase.from('unit_types').insert({ unit_name: newName.trim().toLowerCase(), unit_short: newShort.trim().toLowerCase(), is_active: true });
       if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
       else { toast({ title: 'Unit added' }); setNewName(''); setNewShort(''); onSaved(); }
     } else {
@@ -1862,6 +1877,21 @@ function ManageCatalogModal({ categories, brands, unitTypes, onClose, onSaved }:
       const { error } = await supabase.from(table).insert(insertData);
       if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
       else { toast({ title: 'Success', description: `${tab === 'categories' ? 'Category' : 'Brand'} added` }); setNewName(''); setParentCategory(''); onSaved(); }
+    }
+    setSaving(false);
+  }
+
+  async function handleSaveEdit(id: string, isUnit = false) {
+    setSaving(true);
+    if (isUnit) {
+      const { error } = await supabase.from('unit_types').update({ unit_name: editingName.trim().toLowerCase(), unit_short: editingShort.trim().toLowerCase() }).eq('id', id);
+      if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
+      else { toast({ title: 'Unit updated' }); cancelEdit(); onSaved(); }
+    } else {
+      const table = tab === 'categories' ? 'categories' : 'brands';
+      const { error } = await supabase.from(table).update({ name: editingName.trim(), slug: editingName.trim().toLowerCase().replace(/\s+/g, '-') }).eq('id', id);
+      if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
+      else { toast({ title: 'Updated' }); cancelEdit(); onSaved(); }
     }
     setSaving(false);
   }
@@ -1971,22 +2001,42 @@ function ManageCatalogModal({ categories, brands, unitTypes, onClose, onSaved }:
               unitTypes.length === 0 ? (
                 <p className="text-center text-sm text-muted-foreground py-6">No units yet. Add one above.</p>
               ) : (
-                <div className="grid grid-cols-3 gap-1 px-2 py-1 text-xs font-semibold text-muted-foreground border-b border-border mb-1">
-                  <span>Name</span><span>Short</span><span></span>
+                <div className="grid grid-cols-4 gap-1 px-2 py-1 text-xs font-semibold text-muted-foreground border-b border-border mb-1">
+                  <span className="col-span-1">Name</span><span className="col-span-1">Short</span><span className="col-span-2"></span>
                 </div>
               ) && unitTypes.map(u => (
-                <div key={u.id} className="grid grid-cols-3 gap-1 items-center px-2 py-1.5 rounded-lg hover:bg-muted/50 group">
-                  <span className="text-sm text-foreground font-medium">{u.unit_name}</span>
-                  <span className="text-sm text-muted-foreground font-mono">{u.unit_short}</span>
-                  <div className="flex justify-end">
-                    <button
-                      onClick={() => handleDelete(u.id, true)}
-                      className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition"
-                      title="Remove unit"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
+                <div key={u.id} className="grid grid-cols-4 gap-1 items-center px-2 py-1.5 rounded-lg hover:bg-muted/50 group">
+                  {editingId === u.id ? (
+                    <>
+                      <input value={editingName} onChange={e => setEditingName(e.target.value)} className="col-span-1 border border-blue-300 rounded px-1 py-0.5 text-sm" autoFocus />
+                      <input value={editingShort} onChange={e => setEditingShort(e.target.value)} className="col-span-1 border border-blue-300 rounded px-1 py-0.5 text-sm" />
+                      <div className="col-span-2 flex justify-end gap-1">
+                        <button onClick={() => handleSaveEdit(u.id, true)} disabled={saving} className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs">Save</button>
+                        <button onClick={cancelEdit} className="px-2 py-0.5 border border-border rounded text-xs">Cancel</button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-sm text-foreground font-medium">{u.unit_name}</span>
+                      <span className="text-sm text-muted-foreground font-mono">{u.unit_short}</span>
+                      <div className="col-span-2 flex justify-end gap-1">
+                        <button
+                          onClick={() => startEdit(u.id, u.unit_name, u.unit_short)}
+                          className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-blue-600 hover:bg-blue-50 transition"
+                          title="Edit unit"
+                        >
+                          <Edit className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(u.id, true)}
+                          className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition"
+                          title="Remove unit"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               ))
             ) : items.length === 0 ? (
@@ -2004,21 +2054,53 @@ function ManageCatalogModal({ categories, brands, unitTypes, onClose, onSaved }:
                             {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                           </button>
                         )}
-                        <span className="text-sm text-foreground font-medium">{cat.name}</span>
-                        {subs.length > 0 && <span className="text-xs text-muted-foreground">({subs.length})</span>}
+                        {editingId === cat.id ? (
+                          <div className="flex items-center gap-2 flex-1">
+                            <input value={editingName} onChange={e => setEditingName(e.target.value)} className="border border-blue-300 rounded px-2 py-0.5 text-sm flex-1" autoFocus />
+                            <button onClick={() => handleSaveEdit(cat.id)} disabled={saving} className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs">Save</button>
+                            <button onClick={cancelEdit} className="px-2 py-0.5 border border-border rounded text-xs">Cancel</button>
+                          </div>
+                        ) : (
+                          <>
+                            <span className="text-sm text-foreground font-medium">{cat.name}</span>
+                            {subs.length > 0 && <span className="text-xs text-muted-foreground">({subs.length})</span>}
+                          </>
+                        )}
                       </div>
-                      <button onClick={() => handleDelete(cat.id)} className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition" title="Delete">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {editingId !== cat.id && (
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => startEdit(cat.id, cat.name)} className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-blue-600 hover:bg-blue-50 transition" title="Edit">
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
+                          <button onClick={() => handleDelete(cat.id)} className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition" title="Delete">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
                     </div>
                     {isExpanded && subs.length > 0 && (
                       <div className="ml-6 space-y-1 border-l border-border pl-2">
                         {subs.map(sub => (
                           <div key={sub.id} className="flex items-center justify-between px-3 py-1.5 rounded-lg hover:bg-muted/50 group">
-                            <span className="text-sm text-muted-foreground">{sub.name}</span>
-                            <button onClick={() => handleDelete(sub.id)} className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition" title="Delete">
-                              <Trash2 className="w-3 h-3" />
-                            </button>
+                            {editingId === sub.id ? (
+                              <div className="flex items-center gap-2 flex-1">
+                                <input value={editingName} onChange={e => setEditingName(e.target.value)} className="border border-blue-300 rounded px-2 py-0.5 text-sm flex-1" autoFocus />
+                                <button onClick={() => handleSaveEdit(sub.id)} disabled={saving} className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs">Save</button>
+                                <button onClick={cancelEdit} className="px-2 py-0.5 border border-border rounded text-xs">Cancel</button>
+                              </div>
+                            ) : (
+                              <>
+                                <span className="text-sm text-muted-foreground">{sub.name}</span>
+                                <div className="flex items-center gap-1">
+                                  <button onClick={() => startEdit(sub.id, sub.name)} className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:text-blue-600 hover:bg-blue-50 transition" title="Edit">
+                                    <Edit className="w-3 h-3" />
+                                  </button>
+                                  <button onClick={() => handleDelete(sub.id)} className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition" title="Delete">
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              </>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -2029,10 +2111,25 @@ function ManageCatalogModal({ categories, brands, unitTypes, onClose, onSaved }:
             ) : (
               brands.map(item => (
                 <div key={item.id} className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-muted/50 group">
-                  <span className="text-sm text-foreground">{item.name}</span>
-                  <button onClick={() => handleDelete(item.id)} className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition" title="Delete">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  {editingId === item.id ? (
+                    <div className="flex items-center gap-2 flex-1">
+                      <input value={editingName} onChange={e => setEditingName(e.target.value)} className="border border-blue-300 rounded px-2 py-0.5 text-sm flex-1" autoFocus />
+                      <button onClick={() => handleSaveEdit(item.id)} disabled={saving} className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs">Save</button>
+                      <button onClick={cancelEdit} className="px-2 py-0.5 border border-border rounded text-xs">Cancel</button>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="text-sm text-foreground">{item.name}</span>
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => startEdit(item.id, item.name)} className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-blue-600 hover:bg-blue-50 transition" title="Edit">
+                          <Edit className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => handleDelete(item.id)} className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition" title="Delete">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               ))
             )}

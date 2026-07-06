@@ -11,12 +11,8 @@ interface PnLData {
   serviceRevenue: number;
   totalRevenue: number;
 
-  // COGS components
-  openingInventory: number;
-  purchases: number;
-  freightIn: number;
-  closingInventory: number;
-  totalCOGS: number;
+  // COGS - from stock movements only
+  costOfGoodsSold: number;
 
   // Profit levels
   grossProfit: number;
@@ -46,11 +42,7 @@ export default function PLPage() {
     salesRevenue: 0,
     serviceRevenue: 0,
     totalRevenue: 0,
-    openingInventory: 0,
-    purchases: 0,
-    freightIn: 0,
-    closingInventory: 0,
-    totalCOGS: 0,
+    costOfGoodsSold: 0,
     grossProfit: 0,
     operatingExpenses: [],
     totalOperatingExpenses: 0,
@@ -101,51 +93,18 @@ export default function PLPage() {
     setPeriodLabel(label);
 
     // Fetch all data in parallel
-    const [
-      invoicesRes, stockMovementsRes, accountsRes, inventoryItemsRes,
-      purchaseOrdersRes, journalEntriesRes
-    ] = await Promise.all([
+    const [invoicesRes, stockMovementsRes, accountsRes] = await Promise.all([
       supabase.from('invoices').select('total_amount').gte('invoice_date', startDate).lte('invoice_date', endDate).neq('status', 'cancelled'),
-      supabase.from('stock_movements').select('quantity, unit_cost, movement_type, created_at').gte('created_at', startDate).lte('created_at', endDate),
+      supabase.from('stock_movements').select('quantity, unit_cost, movement_type').eq('movement_type', 'sale').gte('created_at', startDate).lte('created_at', endDate),
       supabase.from('accounts').select('id, code, name, account_type, balance'),
-      supabase.from('inventory_items').select('quantity_on_hand, product:products(cost_price)'),
-      supabase.from('purchase_orders').select('total_amount, status').gte('order_date', startDate).lte('order_date', endDate),
-      supabase.from('journal_entries').select('id, entry_date').gte('entry_date', startDate).lte('entry_date', endDate),
     ]);
 
     // Calculate sales revenue
     const salesRevenue = (invoicesRes.data || []).reduce((sum, inv) => sum + Number(inv.total_amount), 0);
 
-    // Calculate COGS components
-    // Opening inventory = total inventory value at period start
-    const openingInventory = (inventoryItemsRes.data || []).reduce((sum: number, item: any) => {
-      return sum + (Number(item.quantity_on_hand) * Number(item.product?.cost_price || 0));
-    }, 0);
-
-    // Purchases in period
-    const purchases = (purchaseOrdersRes.data || []).filter(po => po.status !== 'cancelled').reduce((sum, po) => sum + Number(po.total_amount || 0), 0);
-
-    // Freight in - get from journal entries if tracked
-    let freightIn = 0;
-    const freightAccount = (accountsRes.data || []).find(a => a.name.toLowerCase().includes('freight'));
-    if (freightAccount) {
-      const { data: freightLines } = await supabase.from('journal_lines').select('debit, credit').eq('account_id', freightAccount.id);
-      freightIn = (freightLines || []).reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0);
-    }
-
-    // Closing inventory = use same as opening for now (simplified)
-    const closingInventory = openingInventory;
-
-    // COGS calculation: Opening + Purchases + Freight - Closing
-    const totalCOGS = openingInventory + purchases + freightIn - closingInventory;
-
-    // Alternative: Calculate COGS from actual stock movements
-    const cogsFromMovements = (stockMovementsRes.data || [])
-      .filter(m => m.movement_type === 'sale')
+    // Calculate COGS from actual stock movements (sales)
+    const costOfGoodsSold = (stockMovementsRes.data || [])
       .reduce((sum, m) => sum + (Math.abs(Number(m.quantity)) * Number(m.unit_cost || 0)), 0);
-
-    // Use movements-based COGS as it's more accurate
-    const actualCOGS = cogsFromMovements > 0 ? cogsFromMovements : totalCOGS;
 
     // Service revenue (other operating revenue)
     let serviceRevenue = 0;
@@ -159,14 +118,22 @@ export default function PLPage() {
     }
 
     const totalRevenue = salesRevenue + serviceRevenue;
-    const grossProfit = totalRevenue - actualCOGS;
+    const grossProfit = totalRevenue - costOfGoodsSold;
 
-    // Operating expenses
-    const expenseAccounts = (accountsRes.data || []).filter(a => a.account_type === 'expense');
+    // Operating expenses - EXCLUDE cost_of_sales/COGS type accounts
+    const expenseAccounts = (accountsRes.data || []).filter(a =>
+      a.account_type === 'expense' && a.account_type !== 'cost_of_sales'
+    );
     const operatingExpenses: { name: string; amount: number }[] = [];
     let totalOperatingExpenses = 0;
 
     for (const acc of expenseAccounts) {
+      // Skip COGS-related accounts
+      if (acc.name.toLowerCase().includes('cost of goods') ||
+          acc.name.toLowerCase().includes('cogs') ||
+          acc.name.toLowerCase().includes('cost of sales')) {
+        continue;
+      }
       const { data: lines } = await supabase.from('journal_lines').select('debit, credit').eq('account_id', acc.id);
       const netDebit = (lines || []).reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0);
       if (netDebit > 0) {
@@ -206,11 +173,7 @@ export default function PLPage() {
       salesRevenue,
       serviceRevenue,
       totalRevenue,
-      openingInventory,
-      purchases: purchases,
-      freightIn,
-      closingInventory,
-      totalCOGS: actualCOGS,
+      costOfGoodsSold,
       grossProfit,
       operatingExpenses,
       totalOperatingExpenses,
@@ -237,11 +200,7 @@ export default function PLPage() {
       ['Total Revenue', data.totalRevenue],
       [''],
       ['COST OF GOODS SOLD (COGS)'],
-      ['Opening Inventory', data.openingInventory],
-      ['Purchases', data.purchases],
-      ['Freight In', data.freightIn],
-      ['Less: Closing Inventory', -data.closingInventory],
-      ['Total COGS', data.totalCOGS],
+      ['Cost of Goods Sold', data.costOfGoodsSold],
       [''],
       ['GROSS PROFIT', data.grossProfit],
       [''],
@@ -338,13 +297,10 @@ export default function PLPage() {
             <SectionHeader title="COST OF GOODS SOLD (COGS)" className="mt-4" />
             <table className="w-full text-sm">
               <tbody>
-                <StatementRow label="Opening Inventory" amount={data.openingInventory} />
-                <StatementRow label="Purchases" amount={data.purchases} />
-                <StatementRow label="Freight In" amount={data.freightIn} />
-                <StatementRow label="Less: Closing Inventory" amount={-data.closingInventory} isDeduction />
-                <TotalRow label="Total COGS" amount={data.totalCOGS} variant="orange" />
+                <StatementRow label="Cost of Goods Sold" amount={data.costOfGoodsSold} />
               </tbody>
             </table>
+            <TotalRow label="Total COGS" amount={data.costOfGoodsSold} variant="orange" />
 
             {/* GROSS PROFIT */}
             <ProfitRow label="GROSS PROFIT" amount={data.grossProfit} />
