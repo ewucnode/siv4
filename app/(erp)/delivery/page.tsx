@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
@@ -8,6 +8,7 @@ import { Plus, Search, MapPin, Clock, CircleCheck as CheckCircle2, Circle as XCi
 import DeliveryChallan from '@/components/DeliveryChallan';
 import type { Delivery, DeliveryStatus, Customer } from '@/lib/types';
 import Pagination from '@/components/ui/AppPagination';
+import { printNode } from '@/lib/print';
 
 const statusConfig: Record<DeliveryStatus, { label: string; color: string; bg: string; icon: React.ElementType }> = {
   pending: { label: 'Pending', color: 'text-gray-600', bg: 'bg-gray-100', icon: Clock },
@@ -40,6 +41,7 @@ export default function DeliveryPage() {
   const [challanDelivery, setChallanDelivery] = useState<DeliveryWithCustomer | null>(null);
   const [challanItems, setChallanItems] = useState<any[]>([]);
   const [challanLoading, setChallanLoading] = useState(false);
+  const challanPrintRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { loadData(); }, []);
 
@@ -344,13 +346,13 @@ export default function DeliveryPage() {
             <div className="no-print flex items-center justify-between px-6 py-3 border-b border-border sticky top-0 bg-white z-10">
               <span className="text-sm font-semibold text-muted-foreground">Delivery Challan Preview</span>
               <div className="flex items-center gap-2">
-                <button onClick={() => window.print()} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
+                <button onClick={() => printNode(challanPrintRef.current)} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
                   <Printer className="w-3.5 h-3.5" />Print / PDF
                 </button>
                 <button onClick={() => setChallanDelivery(null)} className="text-muted-foreground hover:text-foreground p-1"><X className="w-5 h-5" /></button>
               </div>
             </div>
-            <div className="p-8">
+            <div className="p-8" ref={challanPrintRef}>
               {challanLoading ? (
                 <div className="space-y-3">{Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-6 bg-muted rounded animate-pulse" />)}</div>
               ) : (

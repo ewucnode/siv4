@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency, formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
@@ -10,6 +10,7 @@ import { isMultiUnitEnabled, getDefaultSaleUnit, convertToBaseUnit } from '@/lib
 import ProductSearchInput from '@/components/ui/ProductSearchInput';
 import ProductFilterDropdown from '@/components/ui/ProductFilterDropdown';
 import PrintTemplate from '@/components/PrintTemplate';
+import { printNode } from '@/lib/print';
 import Pagination from '@/components/ui/AppPagination';
 
 const statusConfig: Record<QuotationStatus, { label: string; color: string; bg: string }> = {
@@ -1118,6 +1119,7 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, companySetti
   companySettings: any;
 }) {
   const cfg = statusConfig[quotation.status as QuotationStatus] || statusConfig.draft;
+  const printRef = useRef<HTMLDivElement>(null);
 
   function buildShareText() {
     const lines = [
@@ -1164,14 +1166,14 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, companySetti
             <button onClick={shareEmail} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
               <Mail className="w-3.5 h-3.5" />Email
             </button>
-            <button onClick={() => window.print()} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-sm font-medium transition">
+            <button onClick={() => printNode(printRef.current)} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-sm font-medium transition">
               <Printer className="w-3.5 h-3.5" />Print / PDF
             </button>
             <button onClick={onClose} className="text-muted-foreground hover:text-foreground p-1"><X className="w-5 h-5" /></button>
           </div>
         </div>
 
-        <div className="p-8">
+        <div className="p-8" ref={printRef}>
           <PrintTemplate
             docType="QUOTATION"
             docNumber={quotation.quote_number}
