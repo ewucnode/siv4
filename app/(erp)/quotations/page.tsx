@@ -438,6 +438,7 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
     expiry_date: '',
     notes: '',
     extra_discount: 0,
+    cart_discount_percent: 0,
   });
   const [items, setItems] = useState<{
     product_id: string;
@@ -530,7 +531,8 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
   const subtotal = items.reduce((sum, item) => {
     return sum + (item.quantity * item.unit_price * (1 - item.discount_percent / 100));
   }, 0);
-  const totalAmount = Math.max(0, subtotal - (form.extra_discount || 0));
+  const cartDiscountAmount = (subtotal * (form.cart_discount_percent || 0)) / 100;
+  const totalAmount = Math.max(0, subtotal - cartDiscountAmount - (form.extra_discount || 0));
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -552,8 +554,9 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
         issue_date: form.issue_date,
         expiry_date: form.expiry_date || null,
         subtotal,
+        cart_discount_percent: form.cart_discount_percent || 0,
         extra_discount: form.extra_discount || 0,
-        discount_amount: 0,
+        discount_amount: cartDiscountAmount,
         tax_amount: 0,
         total_amount: totalAmount,
         status: 'draft',
@@ -804,6 +807,24 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
                   <p className="text-xs text-muted-foreground">Subtotal</p>
                   <p className="text-sm font-semibold text-foreground">{formatCurrency(subtotal)}</p>
                 </div>
+                <div className="flex justify-between items-center gap-2">
+                  <label className="text-xs text-muted-foreground">Cart Discount %</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.5"
+                    value={form.cart_discount_percent || 0}
+                    onChange={e => setForm({ ...form, cart_discount_percent: Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)) })}
+                    className="w-24 border border-border rounded-lg px-2 py-1 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </div>
+                {(form.cart_discount_percent || 0) > 0 && (
+                  <div className="flex justify-between text-xs text-red-500">
+                    <span>Cart Discount ({form.cart_discount_percent}%)</span>
+                    <span>-{formatCurrency(cartDiscountAmount)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between items-center gap-2">
                   <label className="text-xs text-muted-foreground">Extra Discount ৳</label>
                   <input
@@ -1239,6 +1260,8 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, companySetti
             }))}
             subtotal={Number(quotation.subtotal)}
             discountTotal={items.reduce((s, item: any) => s + (item.quantity * item.unit_price * (item.discount_percent || 0) / 100), 0)}
+            cartDiscount={Number((quotation as any).discount_amount) || 0}
+            cartDiscountPercent={Number((quotation as any).cart_discount_percent) || 0}
             extraDiscount={Number((quotation as any).extra_discount) || 0}
             hideDiscountPercent={hideDiscountPercent}
             totalAmount={Number(quotation.total_amount)}

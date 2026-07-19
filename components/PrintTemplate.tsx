@@ -48,6 +48,8 @@ export interface PrintTemplateProps {
   items: PrintItem[];
   subtotal: number;
   discountTotal?: number;
+  cartDiscount?: number;
+  cartDiscountPercent?: number;
   extraDiscount?: number;
   hideDiscountPercent?: boolean;
   totalAmount: number;
@@ -120,6 +122,8 @@ export default function PrintTemplate({
   items,
   subtotal,
   discountTotal = 0,
+  cartDiscount = 0,
+  cartDiscountPercent = 0,
   extraDiscount = 0,
   hideDiscountPercent = false,
   totalAmount,
@@ -615,14 +619,20 @@ export default function PrintTemplate({
                 </tr>
                 {discountTotal > 0 && (
                   <tr>
-                    <td style={{ padding: '2px 0', color: '#555' }}>Discount</td>
-                    <td style={{ padding: '2px 0', textAlign: 'right', fontWeight: '500' }}>{fmt(discountTotal)}</td>
+                    <td style={{ padding: '2px 0', color: '#555' }}>Item Discount</td>
+                    <td style={{ padding: '2px 0', textAlign: 'right', fontWeight: '500' }}>-{fmt(discountTotal)}</td>
+                  </tr>
+                )}
+                {cartDiscount > 0 && (
+                  <tr>
+                    <td style={{ padding: '2px 0', color: '#555' }}>Cart Discount{cartDiscountPercent > 0 ? ` (${cartDiscountPercent}%)` : ''}</td>
+                    <td style={{ padding: '2px 0', textAlign: 'right', fontWeight: '500' }}>-{fmt(cartDiscount)}</td>
                   </tr>
                 )}
                 {extraDiscount > 0 && (
                   <tr>
                     <td style={{ padding: '2px 0', color: '#555' }}>Extra Discount</td>
-                    <td style={{ padding: '2px 0', textAlign: 'right', fontWeight: '500' }}>{fmt(extraDiscount)}</td>
+                    <td style={{ padding: '2px 0', textAlign: 'right', fontWeight: '500' }}>-{fmt(extraDiscount)}</td>
                   </tr>
                 )}
                 <tr>
