@@ -4,9 +4,11 @@ import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Search, Plus, Minus, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CircleCheck as CheckCircle2, X, Camera, UserPlus, Filter, Wallet, Maximize2, Minimize2, ArrowRight, ArrowLeft, Receipt, History, Eye, EyeOff, ImagePlus, Package, Check, Clock, DollarSign } from 'lucide-react';
+import { Search, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CircleCheck as CheckCircle2, X, Camera, UserPlus, Filter, Wallet, Maximize2, Minimize2, ArrowRight, ArrowLeft, Receipt, History, Eye, EyeOff, ImagePlus, Package, Check, Clock, DollarSign } from 'lucide-react';
 import type { ProductUnit } from '@/lib/types';
 import { isMultiUnitEnabled, getDefaultSaleUnit, convertToBaseUnit } from '@/lib/unit-utils';
+import { useGlobalCart } from '@/hooks/use-global-cart';
+import BarcodeScannerModal from '@/components/BarcodeScannerModal';
 
 interface CartItem {
   id: string;
@@ -80,6 +82,51 @@ export default function POSPage() {
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
   const [reference, setReference] = useState('');
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { items: globalCartItems, clearCart: clearGlobalCart } = useGlobalCart();
+  const globalCartConsumed = useRef(false);
+
+  // Consume global cart items on mount (from header scanner)
+  useEffect(() => {
+    if (globalCartConsumed.current) return;
+    if (globalCartItems.length === 0) return;
+    globalCartConsumed.current = true;
+    (async () => {
+      const productIds = globalCartItems.map(i => i.id);
+      const { data } = await supabase
+        .from('products')
+        .select(`id, name, sku, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit,
+          inventory_items(id, warehouse_id, quantity_on_hand),
+          units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order)`)
+        .in('id', productIds);
+      if (data) {
+        const productsById = new Map(data.map((p: any) => [p.id, p]));
+        const newCartItems: CartItem[] = [];
+        for (const gci of globalCartItems) {
+          const p = productsById.get(gci.id) as ProductData | undefined;
+          if (!p) continue;
+          const invItems = p.inventory_items || [];
+          const bestInv = invItems.length > 0 ? invItems.reduce((a, b) => a.quantity_on_hand > b.quantity_on_hand ? a : b) : null;
+          const stockAvailableInBase = bestInv ? bestInv.quantity_on_hand : 0;
+          const unit = getDefaultSaleUnit(p as any);
+          const unitPrice = gci.unit_price || unit.price || p.sale_price;
+          newCartItems.push({
+            id: p.id, name: p.name, sku: p.sku, sale_price: unitPrice,
+            cost_price: unit.cost_price || p.cost_price || 0,
+            quantity: gci.quantity, image_url: p.image_url,
+            inventory_item_id: bestInv?.id, warehouse_id: bestInv?.warehouse_id,
+            stock_available: stockAvailableInBase, selected_unit: unit,
+            unit_price: unitPrice, base_quantity: convertToBaseUnit(gci.quantity, unit),
+            discount_percent: 0,
+          });
+        }
+        if (newCartItems.length > 0) {
+          setCart(prev => [...newCartItems, ...prev]);
+          toast({ title: 'Cart loaded', description: `${newCartItems.length} item(s) from scan added to cart` });
+        }
+        clearGlobalCart();
+      }
+    })();
+  }, [globalCartItems]);
 
   useEffect(() => {
     loadProducts('');
@@ -1145,7 +1192,22 @@ export default function POSPage() {
 
       {showScanner && (
         <BarcodeScannerModal
-          onDetected={(sku) => { setSearch(sku); setShowScanner(false); }}
+          onDetected={async (code) => {
+            const { data } = await supabase
+              .from('products')
+              .select(`id, name, sku, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit,
+                inventory_items(id, warehouse_id, quantity_on_hand),
+                units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order)`)
+              .eq('sku', code)
+              .maybeSingle();
+            setShowScanner(false);
+            if (data) {
+              handleProductClick(data as ProductData);
+              toast({ title: 'Product found', description: (data as ProductData).name });
+            } else {
+              toast({ title: 'Not found', description: `No product with SKU ${code}`, variant: 'destructive' });
+            }
+          }}
           onClose={() => setShowScanner(false)}
         />
       )}
@@ -1271,101 +1333,6 @@ export default function POSPage() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function BarcodeScannerModal({ onDetected, onClose }: { onDetected: (sku: string) => void; onClose: () => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [error, setError] = useState('');
-  const [manualSku, setManualSku] = useState('');
-  const [scanning, setScanning] = useState(false);
-  const streamRef = useRef<MediaStream | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const supported = typeof window !== 'undefined' && 'BarcodeDetector' in window;
-
-  useEffect(() => {
-    if (!supported) return;
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play();
-          setScanning(true);
-          const detector = new (window as any).BarcodeDetector({
-            formats: ['code_128', 'code_39', 'ean_13', 'ean_8', 'qr_code'],
-          });
-          intervalRef.current = setInterval(async () => {
-            if (!videoRef.current || videoRef.current.readyState < 2) return;
-            try {
-              const barcodes = await detector.detect(videoRef.current);
-              if (barcodes.length > 0) {
-                stopCamera();
-                onDetected(barcodes[0].rawValue);
-              }
-            } catch (_) {}
-          }, 300);
-        }
-      } catch (_) {
-        setError('Camera access denied. Allow camera access or enter SKU manually.');
-      }
-    }
-    startCamera();
-    return () => stopCamera();
-  }, []);
-
-  function stopCamera() {
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-          <h3 className="font-bold text-sm flex items-center gap-2"><Camera className="w-4 h-4" />Scan Barcode</h3>
-          <button onClick={() => { stopCamera(); onClose(); }} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
-        </div>
-        <div className="p-4 space-y-4">
-          {supported && !error ? (
-            <div className="relative">
-              <video ref={videoRef} className="w-full rounded-xl bg-black aspect-video object-cover" muted playsInline />
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-48 h-28 border-2 border-blue-400 rounded-xl opacity-80" />
-              </div>
-              {scanning && <p className="text-xs text-center text-muted-foreground mt-2">Point camera at barcode to scan automatically</p>}
-            </div>
-          ) : (
-            <div className="py-2">
-              <p className="text-xs text-center text-muted-foreground">
-                {error || 'Camera scanning not supported in this browser.'}
-              </p>
-            </div>
-          )}
-          <div className="space-y-1.5">
-            <p className="text-xs text-muted-foreground">{supported && !error ? 'Or type SKU manually:' : 'Enter SKU manually:'}</p>
-            <div className="flex gap-2">
-              <input
-                value={manualSku}
-                onChange={e => setManualSku(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && manualSku.trim()) { stopCamera(); onDetected(manualSku.trim()); } }}
-                placeholder="Product SKU..."
-                autoFocus={!supported || !!error}
-                className="flex-1 border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-              />
-              <button
-                onClick={() => { if (manualSku.trim()) { stopCamera(); onDetected(manualSku.trim()); } }}
-                disabled={!manualSku.trim()}
-                className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-50"
-              >
-                Search
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

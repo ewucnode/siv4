@@ -131,6 +131,7 @@ function StockByWarehouse({ productId, warehouses, inventoryByWarehouse, unit }:
 
 interface ProductWithStock extends Omit<Product, 'category' | 'brand'> {
   total_stock?: number;
+  total_sold?: number;
   category?: { name: string };
   brand?: { name: string };
   product_colors?: { id: string; name: string; hex_code: string }[];
@@ -203,6 +204,25 @@ export default function InventoryPage() {
       }
     }
 
+    // Fetch total sold quantities from invoice_items for sold-out detection
+    let allSoldItems: any[] = [];
+    {
+      let pg = 0;
+      while (true) {
+        const { data: soldPage } = await supabase
+          .from('invoice_items')
+          .select('product_id, quantity')
+          .range(pg * 1000, (pg + 1) * 1000 - 1);
+        allSoldItems = allSoldItems.concat(soldPage || []);
+        if (!soldPage || soldPage.length < 1000) break;
+        pg++;
+      }
+    }
+    const soldMap: Record<string, number> = {};
+    allSoldItems.forEach((i: any) => {
+      soldMap[i.product_id] = (soldMap[i.product_id] || 0) + Number(i.quantity);
+    });
+
     const [catRes, brandRes, whRes, colorRes, sizeRes, unitTypeRes] = await Promise.all([
       supabase.from('categories').select('*').eq('is_active', true),
       supabase.from('brands').select('*').eq('is_active', true),
@@ -223,6 +243,7 @@ export default function InventoryPage() {
     const prods = allProds.map((p: any) => ({
       ...p,
       total_stock: stockMap[p.id] || 0,
+      total_sold: soldMap[p.id] || 0,
       stock_by_warehouse: Object.entries(byWarehouse[p.id] || {}).map(([warehouse_id, quantity]) => ({
         warehouse_id,
         quantity,
@@ -269,6 +290,7 @@ export default function InventoryPage() {
     const matchStatus = !filterStatus || (
       filterStatus === 'low' ? (p.total_stock || 0) <= p.min_stock_level && (p.total_stock || 0) > 0 :
       filterStatus === 'out' ? (p.total_stock || 0) === 0 :
+      filterStatus === 'sold_out' ? (p.total_stock || 0) === 0 && (p.total_sold || 0) > 0 :
       filterStatus === 'ok' ? (p.total_stock || 0) > p.min_stock_level :
       filterStatus === 'has_stock' ? (p.total_stock || 0) > 0 : true
     );
@@ -418,6 +440,7 @@ export default function InventoryPage() {
           <option value="low">Low Stock</option>
           <option value="has_stock">Has Stock</option>
           <option value="out">Out of Stock</option>
+          <option value="sold_out">Sold Out (Zero after Sales)</option>
         </select>
         {allColors.length > 0 && (
           <SearchableSelect
@@ -1925,11 +1948,10 @@ function BarcodeModal({ product, onClose }: { product: ProductWithStock; onClose
       try {
         JsBarcode(svgRef.current, product.sku, {
           format: 'CODE128',
-          width: 2,
-          height: 80,
-          displayValue: true,
-          fontSize: 14,
-          margin: 10,
+          width: 1.8,
+          height: 50,
+          displayValue: false,
+          margin: 0,
           background: '#ffffff',
           lineColor: '#000000',
         });
@@ -1943,9 +1965,32 @@ function BarcodeModal({ product, onClose }: { product: ProductWithStock; onClose
     const svgEl = svgRef.current;
     if (!svgEl) return;
     const svgHTML = new XMLSerializer().serializeToString(svgEl);
-    const w = window.open('', '_blank', 'width=500,height=350');
+    const w = window.open('', '_blank', 'width=400,height=300');
     if (!w) return;
-    w.document.write(`<!DOCTYPE html><html><head><title>Barcode - ${product.sku}</title></head><body style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;font-family:sans-serif;margin:0"><p style="margin:0 0 4px;font-size:13px;font-weight:600">${product.name}</p><p style="margin:0 0 12px;font-size:11px;color:#666">SKU: ${product.sku}</p>${svgHTML}<script>window.onload=function(){window.print();setTimeout(function(){window.close();},500);}<\/script></body></html>`);
+    const salePrice = formatCurrency(product.sale_price);
+    w.document.write(`<!DOCTYPE html><html><head><title>Barcode - ${product.sku}</title><style>
+      @page { margin: 0; }
+      body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Arial, sans-serif; }
+      .label { width: 2in; height: 1.1in; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 6px 8px; box-sizing: border-box; border: 1px solid #e0e0e0; border-radius: 4px; }
+      .name { font-size: 9px; font-weight: 600; text-align: center; line-height: 1.2; color: #1a1a1a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+      .barcode-wrap { display: flex; justify-content: center; }
+      .barcode-wrap svg { display: block; }
+      .code { font-size: 8px; font-family: 'Courier New', monospace; color: #666; letter-spacing: 0.5px; }
+      .mrp { font-size: 14px; font-weight: 700; color: #1a1a1a; }
+      .mrp-label { font-size: 7px; font-weight: 600; color: #999; text-transform: uppercase; letter-spacing: 1px; }
+      .price-row { display: flex; align-items: baseline; gap: 4px; }
+    </style></head><body>
+      <div class="label">
+        <div class="name">${product.name}</div>
+        <div class="barcode-wrap">${svgHTML}</div>
+        <div class="code">${product.sku}</div>
+        <div class="price-row">
+          <span class="mrp-label">MRP</span>
+          <span class="mrp">${salePrice}</span>
+        </div>
+      </div>
+      <script>window.onload=function(){window.print();setTimeout(function(){window.close();},500);}<\/script>
+    </body></html>`);
     w.document.close();
   }
 
@@ -1957,14 +2002,21 @@ function BarcodeModal({ product, onClose }: { product: ProductWithStock; onClose
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-6 flex flex-col items-center">
-          <p className="text-sm font-semibold text-foreground mb-0.5">{product.name}</p>
-          <p className="text-xs text-muted-foreground mb-4">SKU: {product.sku}</p>
-          <div className="border border-border rounded-lg p-4 bg-white w-full flex justify-center">
-            <svg ref={svgRef} />
+          {/* Professional label preview */}
+          <div className="border border-gray-200 rounded-lg p-4 bg-white w-full max-w-[240px] flex flex-col items-center gap-1.5 shadow-sm">
+            <p className="text-xs font-semibold text-foreground text-center leading-tight line-clamp-2">{product.name}</p>
+            <div className="flex justify-center">
+              <svg ref={svgRef} />
+            </div>
+            <p className="text-[10px] font-mono text-muted-foreground tracking-wide">{product.sku}</p>
+            <div className="flex items-baseline gap-1.5 pt-0.5 border-t border-gray-100 w-full justify-center">
+              <span className="text-[8px] font-semibold text-gray-400 uppercase tracking-wider">MRP</span>
+              <span className="text-lg font-bold text-foreground">{formatCurrency(product.sale_price)}</span>
+            </div>
           </div>
           <button
             onClick={handlePrint}
-            className="mt-4 flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition"
+            className="mt-5 flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition"
           >
             <Printer className="w-4 h-4" />Print Barcode
           </button>

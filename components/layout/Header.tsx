@@ -1,12 +1,15 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { getInitials } from '@/lib/format';
-import { Search, Bell, MessageSquare, ChevronDown, User, LogOut, Settings, CircleHelp as HelpCircle, X, Package, Users, Receipt, ShoppingBag, FileText, Truck, FolderKanban } from 'lucide-react';
+import { Search, Bell, MessageSquare, ChevronDown, User, LogOut, Settings, CircleHelp as HelpCircle, X, Package, Users, Receipt, ShoppingBag, FileText, Truck, FolderKanban, ScanLine, ShoppingCart } from 'lucide-react';
 import type { Profile } from '@/lib/types';
+import { useGlobalCart, type GlobalCartItem } from '@/hooks/use-global-cart';
+import BarcodeScannerModal from '@/components/BarcodeScannerModal';
+import { toast } from '@/hooks/use-toast';
 
 interface HeaderProps {
   onMenuToggle?: () => void;
@@ -39,8 +42,10 @@ export default function Header({ onMenuToggle }: HeaderProps) {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { count: cartCount, addToCart } = useGlobalCart();
 
   useEffect(() => {
     async function loadProfile() {
@@ -211,6 +216,23 @@ export default function Header({ onMenuToggle }: HeaderProps) {
 
       {/* Right actions */}
       <div className="flex items-center gap-1 ml-auto">
+        <button
+          onClick={() => setShowScanner(true)}
+          title="Scan Barcode"
+          className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition-colors"
+        >
+          <ScanLine className="w-4 h-4" />
+        </button>
+        <Link
+          href="/sales/pos"
+          title="POS Cart"
+          className="relative w-8 h-8 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition-colors"
+        >
+          <ShoppingCart className="w-4 h-4" />
+          {cartCount > 0 && (
+            <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 bg-blue-600 text-white text-[9px] font-bold rounded-full flex items-center justify-center">{cartCount > 99 ? '99+' : cartCount}</span>
+          )}
+        </Link>
         <button className="relative w-8 h-8 flex items-center justify-center rounded-lg hover:bg-muted transition-colors">
           <Bell className="w-4 h-4 text-muted-foreground" />
           <span className="absolute top-1 right-1 w-4 h-4 bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">8</span>
@@ -261,6 +283,35 @@ export default function Header({ onMenuToggle }: HeaderProps) {
           )}
         </div>
       </div>
+
+      {showScanner && (
+        <BarcodeScannerModal
+          onDetected={async (code) => {
+            setShowScanner(false);
+            const { data } = await supabase
+              .from('products')
+              .select('id, name, sku, sale_price, image_url')
+              .eq('sku', code)
+              .maybeSingle();
+            if (data) {
+              addToCart({
+                id: data.id,
+                name: data.name,
+                sku: data.sku,
+                unit_price: data.sale_price,
+                quantity: 1,
+                image_url: data.image_url,
+                selected_unit: null,
+              });
+              toast({ title: 'Added to POS cart', description: data.name });
+            } else {
+              toast({ title: 'Not found', description: `No product with SKU ${code}`, variant: 'destructive' });
+            }
+          }}
+          onClose={() => setShowScanner(false)}
+          title="Scan to POS Cart"
+        />
+      )}
     </header>
   );
 }
