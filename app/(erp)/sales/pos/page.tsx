@@ -4,9 +4,11 @@ import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Search, Plus, Minus, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CircleCheck as CheckCircle2, X, Camera, UserPlus, Filter, Wallet, Maximize2, Minimize2, ArrowRight, ArrowLeft, Receipt, History, Eye, EyeOff, ImagePlus, Package, Check, Clock, DollarSign } from 'lucide-react';
+import { Search, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CircleCheck as CheckCircle2, X, Camera, UserPlus, Filter, Wallet, Maximize2, Minimize2, ArrowRight, ArrowLeft, Receipt, History, Eye, EyeOff, ImagePlus, Package, Check, Clock, DollarSign } from 'lucide-react';
 import type { ProductUnit } from '@/lib/types';
 import { isMultiUnitEnabled, getDefaultSaleUnit, convertToBaseUnit } from '@/lib/unit-utils';
+import { useGlobalCart } from '@/hooks/use-global-cart';
+import BarcodeScannerModal from '@/components/BarcodeScannerModal';
 
 interface CartItem {
   id: string;
@@ -77,7 +79,54 @@ export default function POSPage() {
   const [categorySearch, setCategorySearch] = useState('');
   const [storeCreditBalance, setStoreCreditBalance] = useState(0);
   const [applyStoreCredit, setApplyStoreCredit] = useState(false);
+  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [reference, setReference] = useState('');
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { items: globalCartItems, clearCart: clearGlobalCart } = useGlobalCart();
+  const globalCartConsumed = useRef(false);
+
+  // Consume global cart items on mount (from header scanner)
+  useEffect(() => {
+    if (globalCartConsumed.current) return;
+    if (globalCartItems.length === 0) return;
+    globalCartConsumed.current = true;
+    (async () => {
+      const productIds = globalCartItems.map(i => i.id);
+      const { data } = await supabase
+        .from('products')
+        .select(`id, name, sku, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit,
+          inventory_items(id, warehouse_id, quantity_on_hand),
+          units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order)`)
+        .in('id', productIds);
+      if (data) {
+        const productsById = new Map(data.map((p: any) => [p.id, p]));
+        const newCartItems: CartItem[] = [];
+        for (const gci of globalCartItems) {
+          const p = productsById.get(gci.id) as ProductData | undefined;
+          if (!p) continue;
+          const invItems = p.inventory_items || [];
+          const bestInv = invItems.length > 0 ? invItems.reduce((a, b) => a.quantity_on_hand > b.quantity_on_hand ? a : b) : null;
+          const stockAvailableInBase = bestInv ? bestInv.quantity_on_hand : 0;
+          const unit = getDefaultSaleUnit(p as any);
+          const unitPrice = gci.unit_price || unit.price || p.sale_price;
+          newCartItems.push({
+            id: p.id, name: p.name, sku: p.sku, sale_price: unitPrice,
+            cost_price: unit.cost_price || p.cost_price || 0,
+            quantity: gci.quantity, image_url: p.image_url,
+            inventory_item_id: bestInv?.id, warehouse_id: bestInv?.warehouse_id,
+            stock_available: stockAvailableInBase, selected_unit: unit,
+            unit_price: unitPrice, base_quantity: convertToBaseUnit(gci.quantity, unit),
+            discount_percent: 0,
+          });
+        }
+        if (newCartItems.length > 0) {
+          setCart(prev => [...newCartItems, ...prev]);
+          toast({ title: 'Cart loaded', description: `${newCartItems.length} item(s) from scan added to cart` });
+        }
+        clearGlobalCart();
+      }
+    })();
+  }, [globalCartItems]);
 
   useEffect(() => {
     loadProducts('');
@@ -334,7 +383,7 @@ export default function POSPage() {
         .insert({
           invoice_number: invoiceNumber,
           customer_id: customerId,
-          invoice_date: new Date().toISOString().split('T')[0],
+          invoice_date: invoiceDate,
           subtotal: subtotal,
           discount_amount: cartDiscountAmount,
           cart_discount_percent: discount,
@@ -344,6 +393,7 @@ export default function POSPage() {
           amount_paid: paymentTerm === 'full' ? total : (paymentTerm === 'partial' ? amountPaid : 0),
           status: invoiceStatus,
           is_pos: true,
+          reference: reference || null,
         })
         .select()
         .single();
@@ -429,7 +479,7 @@ export default function POSPage() {
           customer_id: customerId,
           amount: creditToApply,
           payment_method: 'store_credit',
-          payment_date: new Date().toISOString().split('T')[0],
+          payment_date: invoiceDate,
           notes: `Store credit redeemed for ${invoiceNumber}`,
         });
         if (creditPayError) console.error('Store credit payment record error:', creditPayError.message);
@@ -446,7 +496,7 @@ export default function POSPage() {
           customer_id: customerId,
           amount: cashToPay,
           payment_method: paymentMethod,
-          payment_date: new Date().toISOString().split('T')[0],
+          payment_date: invoiceDate,
           notes: creditToApply > 0 ? `POS sale (partial store credit: ${formatCurrency(creditToApply)})` : 'POS sale',
         });
         if (payError) console.error('Payment record error:', payError.message);
@@ -475,6 +525,8 @@ export default function POSPage() {
       setShowCheckout(false);
       setAmountPaid('');
       setCartTab('items');
+      setInvoiceDate(new Date().toISOString().split('T')[0]);
+      setReference('');
       setOrderComplete(true);
       toast({ title: 'Success', description: `Order ${invoiceNumber} completed successfully` });
       loadProducts(search);
@@ -864,7 +916,7 @@ export default function POSPage() {
       {/* Cart - Desktop Side Panel / Mobile Bottom Drawer / Maximized Overlay */}
       <div className={`
         ${cartMaximized ? 'fixed inset-0 z-[100]' : 'fixed lg:relative inset-x-0 bottom-0 lg:inset-auto'}
-        ${cartMaximized ? 'w-full h-full lg:w-full lg:h-full' : 'lg:w-96'}
+        ${cartMaximized ? 'w-full h-full lg:w-full lg:h-full' : 'lg:w-[420px]'}
         flex flex-col bg-white
         ${cartMaximized ? 'rounded-none lg:rounded-none' : 'rounded-t-3xl lg:rounded-2xl'}
         border border-border shadow-sm overflow-hidden relative
@@ -920,7 +972,7 @@ export default function POSPage() {
           </div>
         )}
 
-        <div className={`flex-1 overflow-y-auto p-3 space-y-2 ${cartMaximized ? 'lg:max-w-3xl lg:mx-auto lg:w-full' : ''}`}>
+        <div className={`flex-1 overflow-y-auto p-3 space-y-2 ${cartMaximized ? 'lg:max-w-4xl lg:mx-auto lg:w-full' : ''}`}>
           {cart.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-center py-12">
               <div>
@@ -930,7 +982,9 @@ export default function POSPage() {
               </div>
             </div>
           ) : cartTab === 'items' ? (
-            cart.map((item, index) => (
+            cart.map((item, index) => {
+              const lineTotal = item.quantity * item.unit_price * (1 - (item.discount_percent || 0) / 100);
+              return (
             <div
               key={`${item.id}-${item.selected_unit?.id || 'default'}`}
               draggable
@@ -938,14 +992,17 @@ export default function POSPage() {
               onDragOver={e => { e.preventDefault(); setDragOverItem(index); }}
               onDrop={() => { if (draggedItem !== null && draggedItem !== index) reorderCart(draggedItem, index); setDraggedItem(null); setDragOverItem(null); }}
               onDragEnd={() => { setDraggedItem(null); setDragOverItem(null); }}
-              className={`flex items-center gap-1.5 bg-muted/30 rounded-lg px-1.5 py-1 transition-all ${draggedItem === index ? 'opacity-40' : ''} ${dragOverItem === index && draggedItem !== index ? 'border-2 border-blue-400' : ''} cursor-grab active:cursor-grabbing`}
+              className={`bg-muted/30 rounded-lg px-2 py-1.5 transition-all ${draggedItem === index ? 'opacity-40' : ''} ${dragOverItem === index && draggedItem !== index ? 'border-2 border-blue-400' : ''} cursor-grab active:cursor-grabbing`}
             >
-              <span className="text-muted-foreground/40 text-[10px] select-none shrink-0">⠿</span>
-              <button onClick={() => removeFromCart(item.id, item.selected_unit?.id || undefined)} className="text-muted-foreground hover:text-red-500 transition shrink-0"><X className="w-3 h-3" /></button>
-              <div className="flex-1 min-w-0">
-                <p className="text-[11px] font-semibold text-foreground truncate leading-tight">{item.name}</p>
-                <div className="flex items-center gap-1 mt-0.5">
-                  <span className="text-[9px] text-muted-foreground">৳</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground/40 text-[10px] select-none shrink-0">⠿</span>
+                <button onClick={() => removeFromCart(item.id, item.selected_unit?.id || undefined)} className="text-muted-foreground hover:text-red-500 transition shrink-0"><X className="w-3 h-3" /></button>
+                <p className="flex-1 min-w-0 text-[11px] font-semibold text-foreground truncate leading-tight">{item.name}</p>
+                <span className="text-[11px] font-bold text-blue-600 shrink-0 whitespace-nowrap">{formatCurrency(lineTotal)}</span>
+              </div>
+              <div className="flex items-end gap-1.5 mt-1 pl-5">
+                <div className="flex flex-col">
+                  <label className="text-[8px] font-medium text-muted-foreground leading-none mb-0.5">Price</label>
                   <input
                     type="number"
                     min="0"
@@ -953,9 +1010,12 @@ export default function POSPage() {
                     value={item.unit_price}
                     onChange={e => updateCartPrice(item.id, item.selected_unit?.id, parseFloat(e.target.value) || 0)}
                     onClick={e => e.stopPropagation()}
-                    className="w-12 text-[10px] border border-border rounded px-1 py-0.5 focus:outline-none focus:border-blue-400 text-right bg-white"
+                    className="w-16 text-[10px] border border-border rounded px-1 py-0.5 focus:outline-none focus:border-blue-400 text-right bg-white"
                   />
-                  {item.selected_unit && <span className="text-[9px] text-muted-foreground">/{item.selected_unit.unit_short || item.selected_unit.unit_name}</span>}
+                </div>
+                {item.selected_unit && <span className="text-[9px] text-muted-foreground pb-1">/{item.selected_unit.unit_short || item.selected_unit.unit_name}</span>}
+                <div className="flex flex-col">
+                  <label className="text-[8px] font-medium text-muted-foreground leading-none mb-0.5">Disc %</label>
                   <input
                     type="number"
                     min="0"
@@ -964,27 +1024,29 @@ export default function POSPage() {
                     value={item.discount_percent || 0}
                     onChange={e => updateCartItemDiscount(item.id, item.selected_unit?.id, parseFloat(e.target.value) || 0)}
                     onClick={e => e.stopPropagation()}
-                    className="w-9 text-[10px] border border-amber-300 rounded px-1 py-0.5 focus:outline-none focus:border-amber-400 text-center bg-amber-50/30"
+                    className="w-14 text-[10px] border border-amber-300 rounded px-1 py-0.5 focus:outline-none focus:border-amber-400 text-center bg-amber-50/30"
                     placeholder="0"
-                    title="Discount %"
+                  />
+                </div>
+                {(item.discount_percent || 0) > 0 && (
+                  <span className="text-[9px] text-green-600 font-semibold whitespace-nowrap pb-1">→ {formatCurrency(item.unit_price * (1 - (item.discount_percent || 0) / 100))}</span>
+                )}
+                <div className="flex flex-col ml-auto">
+                  <label className="text-[8px] font-medium text-muted-foreground leading-none mb-0.5 text-right">Qty</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={item.quantity}
+                    onChange={e => updateCartQuantity(item.id, item.selected_unit?.id, parseFloat(e.target.value) || 0)}
+                    onClick={e => e.stopPropagation()}
+                    className="w-16 text-[10px] font-bold border border-border rounded px-1 py-0.5 text-center focus:outline-none focus:border-blue-400 bg-white"
                   />
                 </div>
               </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <button onClick={() => updateQty(item.id, item.selected_unit?.id, -1)} className="w-5 h-5 rounded-full bg-white border border-border flex items-center justify-center hover:bg-muted transition"><Minus className="w-2.5 h-2.5" /></button>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={item.quantity}
-                  onChange={e => updateCartQuantity(item.id, item.selected_unit?.id, parseFloat(e.target.value) || 0)}
-                  onClick={e => e.stopPropagation()}
-                  className="w-12 text-xs font-bold border border-border rounded px-1 py-0.5 text-center focus:outline-none focus:border-blue-400 bg-white"
-                />
-                <button onClick={() => updateQty(item.id, item.selected_unit?.id, 1)} className="w-5 h-5 rounded-full bg-blue-500 text-white flex items-center justify-center hover:bg-blue-600 transition"><Plus className="w-2.5 h-2.5" /></button>
-              </div>
             </div>
-            ))
+              );
+            })
           ) : (
             /* Cost Price History preview tab */
             <div className="space-y-2">
@@ -1042,6 +1104,17 @@ export default function POSPage() {
 
         {cart.length > 0 && (
           <div className="p-2.5 border-t border-border space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[8px] font-medium text-muted-foreground leading-none mb-0.5">Date</label>
+                <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} className="w-full border border-border rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+              </div>
+              <div>
+                <label className="block text-[8px] font-medium text-muted-foreground leading-none mb-0.5">Reference</label>
+                <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="w-full border border-border rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/20" placeholder="Ref. person (optional)" />
+              </div>
+            </div>
+
             <div className="flex items-center gap-2">
               <div className="flex-1 flex items-center gap-1">
                 <span className="text-[11px] text-muted-foreground">Cart Disc %</span>
@@ -1119,7 +1192,22 @@ export default function POSPage() {
 
       {showScanner && (
         <BarcodeScannerModal
-          onDetected={(sku) => { setSearch(sku); setShowScanner(false); }}
+          onDetected={async (code) => {
+            const { data } = await supabase
+              .from('products')
+              .select(`id, name, sku, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit,
+                inventory_items(id, warehouse_id, quantity_on_hand),
+                units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order)`)
+              .eq('sku', code)
+              .maybeSingle();
+            setShowScanner(false);
+            if (data) {
+              handleProductClick(data as ProductData);
+              toast({ title: 'Product found', description: (data as ProductData).name });
+            } else {
+              toast({ title: 'Not found', description: `No product with SKU ${code}`, variant: 'destructive' });
+            }
+          }}
           onClose={() => setShowScanner(false)}
         />
       )}
@@ -1245,101 +1333,6 @@ export default function POSPage() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function BarcodeScannerModal({ onDetected, onClose }: { onDetected: (sku: string) => void; onClose: () => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [error, setError] = useState('');
-  const [manualSku, setManualSku] = useState('');
-  const [scanning, setScanning] = useState(false);
-  const streamRef = useRef<MediaStream | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const supported = typeof window !== 'undefined' && 'BarcodeDetector' in window;
-
-  useEffect(() => {
-    if (!supported) return;
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play();
-          setScanning(true);
-          const detector = new (window as any).BarcodeDetector({
-            formats: ['code_128', 'code_39', 'ean_13', 'ean_8', 'qr_code'],
-          });
-          intervalRef.current = setInterval(async () => {
-            if (!videoRef.current || videoRef.current.readyState < 2) return;
-            try {
-              const barcodes = await detector.detect(videoRef.current);
-              if (barcodes.length > 0) {
-                stopCamera();
-                onDetected(barcodes[0].rawValue);
-              }
-            } catch (_) {}
-          }, 300);
-        }
-      } catch (_) {
-        setError('Camera access denied. Allow camera access or enter SKU manually.');
-      }
-    }
-    startCamera();
-    return () => stopCamera();
-  }, []);
-
-  function stopCamera() {
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-          <h3 className="font-bold text-sm flex items-center gap-2"><Camera className="w-4 h-4" />Scan Barcode</h3>
-          <button onClick={() => { stopCamera(); onClose(); }} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
-        </div>
-        <div className="p-4 space-y-4">
-          {supported && !error ? (
-            <div className="relative">
-              <video ref={videoRef} className="w-full rounded-xl bg-black aspect-video object-cover" muted playsInline />
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-48 h-28 border-2 border-blue-400 rounded-xl opacity-80" />
-              </div>
-              {scanning && <p className="text-xs text-center text-muted-foreground mt-2">Point camera at barcode to scan automatically</p>}
-            </div>
-          ) : (
-            <div className="py-2">
-              <p className="text-xs text-center text-muted-foreground">
-                {error || 'Camera scanning not supported in this browser.'}
-              </p>
-            </div>
-          )}
-          <div className="space-y-1.5">
-            <p className="text-xs text-muted-foreground">{supported && !error ? 'Or type SKU manually:' : 'Enter SKU manually:'}</p>
-            <div className="flex gap-2">
-              <input
-                value={manualSku}
-                onChange={e => setManualSku(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && manualSku.trim()) { stopCamera(); onDetected(manualSku.trim()); } }}
-                placeholder="Product SKU..."
-                autoFocus={!supported || !!error}
-                className="flex-1 border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-              />
-              <button
-                onClick={() => { if (manualSku.trim()) { stopCamera(); onDetected(manualSku.trim()); } }}
-                disabled={!manualSku.trim()}
-                className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-50"
-              >
-                Search
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
