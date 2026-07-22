@@ -244,6 +244,7 @@ export interface Invoice {
   total_amount: number;
   amount_paid: number;
   balance_due: number;
+  bad_debt_amount?: number;
   is_pos: boolean;
   edit_count?: number;
   reference?: string;
@@ -426,11 +427,12 @@ export interface Payment {
   id: string;
   payment_number: string;
   payment_type: 'received' | 'made';
-  reference_type: 'invoice' | 'purchase_order' | 'advance' | 'refund';
+  reference_type: 'invoice' | 'purchase_order' | 'advance' | 'refund' | 'receivable' | 'payable';
   reference_id: string;
   customer_id?: string;
   supplier_id?: string;
   amount: number;
+  bad_debt_amount?: number;
   payment_method: PaymentMethod;
   payment_date: string;
   reference_number?: string;

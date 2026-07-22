@@ -431,7 +431,7 @@ export default function SalesPage() {
       // Invoices eligible for return (paid or partially paid, with remaining balance)
       if (i.status !== 'paid' && i.status !== 'partially_paid') return false;
     } else if (filterStatus === 'paid_partial') {
-      if (i.status !== 'paid' && i.status !== 'partially_paid') return false;
+      if (i.status !== 'partially_paid' && i.status !== 'sent') return false;
     } else if (filterStatus === 'refunded') {
       // Invoices that have any sales returns OR status is explicitly refunded
       const hasReturns = i.sales_returns && i.sales_returns.length > 0;
@@ -547,7 +547,7 @@ export default function SalesPage() {
           </div>
           <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
             <option value="">All Status</option>
-            <option value="paid_partial">Paid & Partial</option>
+            <option value="paid_partial">Partial & On credit</option>
             {Object.entries(statusConfig).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
           </select>
           <select value={filterPaymentMethod} onChange={e => setFilterPaymentMethod(e.target.value)} className="border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
@@ -1498,6 +1498,7 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
   const balance = invoice.balance_due || (invoice.total_amount - invoice.amount_paid);
   const [form, setForm] = useState({
     amount: balance,
+    bad_debt_amount: 0,
     payment_method: 'cash' as PaymentMethod,
     payment_date: new Date().toISOString().split('T')[0],
     reference_number: '',
@@ -1507,6 +1508,8 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
   const [error, setError] = useState('');
   const [paymentMethods, setPaymentMethods] = useState<{ code: string; name: string }[]>([]);
 
+  const remainingAfterPayment = balance - form.amount - form.bad_debt_amount;
+
   useEffect(() => {
     supabase.from('payment_methods').select('code, name').eq('is_active', true).order('sort_order')
       .then(({ data }) => { if (data && data.length > 0) setPaymentMethods(data); });
@@ -1514,8 +1517,8 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (form.amount <= 0) { setError('Amount must be greater than 0'); return; }
-    if (form.amount > balance) { setError(`Amount cannot exceed balance due (${formatCurrency(balance)})`); return; }
+    if (form.amount <= 0 && form.bad_debt_amount <= 0) { setError('Payment amount or bad debt amount must be greater than 0'); return; }
+    if (form.amount + form.bad_debt_amount > balance + 0.01) { setError(`Payment + bad debt cannot exceed balance due (${formatCurrency(balance)})`); return; }
 
     setSaving(true);
     setError('');
@@ -1530,6 +1533,7 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
       reference_id: invoice.id,
       customer_id: invoice.customer_id,
       amount: form.amount,
+      bad_debt_amount: form.bad_debt_amount,
       payment_method: form.payment_method,
       payment_date: form.payment_date,
       reference_number: form.reference_number || null,
@@ -1539,13 +1543,15 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
     if (payError) { setError(payError.message); setSaving(false); return; }
 
     const newAmountPaid = invoice.amount_paid + form.amount;
-    const newBalance = invoice.total_amount - newAmountPaid;
-    const newStatus: InvoiceStatus = newBalance <= 0 ? 'paid' : 'partially_paid';
+    const newBadDebt = (invoice.bad_debt_amount || 0) + form.bad_debt_amount;
+    const newBalance = invoice.total_amount - newAmountPaid - newBadDebt;
+    const newStatus: InvoiceStatus = newBalance <= 0.01 ? 'paid' : 'partially_paid';
 
     const { error: invError } = await supabase
       .from('invoices')
       .update({
         amount_paid: newAmountPaid,
+        bad_debt_amount: newBadDebt,
         status: newStatus,
         updated_at: new Date().toISOString()
       })
@@ -1553,7 +1559,37 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
 
     if (invError) { setError(invError.message); setSaving(false); return; }
 
-    // Update customer outstanding balance
+    // Post bad debt journal entry: Dr. Bad Debt Expense (5600) / Cr. Accounts Receivable (1100)
+    if (form.bad_debt_amount > 0) {
+      const { data: badDebtAccount } = await supabase.from('accounts').select('id').eq('code', '5600').maybeSingle();
+      const { data: arAccount } = await supabase.from('accounts').select('id').eq('code', '1100').maybeSingle();
+      const { data: jeNum } = await supabase.rpc('get_next_journal_number');
+      const journalNumber = jeNum || `JE-${Date.now().toString().slice(-6)}`;
+
+      if (badDebtAccount && arAccount) {
+        const { error: jeError } = await supabase.from('journal_entries').insert({
+          journal_number: journalNumber,
+          entry_date: form.payment_date,
+          description: `Bad debt write-off for invoice ${invoice.invoice_number}`,
+          reference_type: 'invoice',
+          reference_id: invoice.id,
+          customer_id: invoice.customer_id,
+        });
+        if (!jeError) {
+          const { data: jeRow } = await supabase.from('journal_entries').select('id').eq('journal_number', journalNumber).maybeSingle();
+          if (jeRow) {
+            await supabase.from('journal_lines').insert([
+              { journal_entry_id: jeRow.id, account_id: badDebtAccount.id, debit: form.bad_debt_amount, credit: 0, description: `Bad debt write-off - ${invoice.invoice_number}` },
+              { journal_entry_id: jeRow.id, account_id: arAccount.id, debit: 0, credit: form.bad_debt_amount, description: `AR reduction - bad debt - ${invoice.invoice_number}` },
+            ]);
+            await supabase.rpc('increment_account_balance', { p_account_id: badDebtAccount.id, p_amount: form.bad_debt_amount });
+            await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_amount: -form.bad_debt_amount });
+          }
+        }
+      }
+    }
+
+    // Update customer outstanding balance (reduce by payment + bad debt)
     const { data: currentCustomer } = await supabase
       .from('customers')
       .select('outstanding_balance, total_purchases')
@@ -1564,21 +1600,23 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
       await supabase
         .from('customers')
         .update({
-          outstanding_balance: Math.max(0, (currentCustomer.outstanding_balance || 0) - form.amount),
+          outstanding_balance: Math.max(0, (currentCustomer.outstanding_balance || 0) - form.amount - form.bad_debt_amount),
           total_purchases: (currentCustomer.total_purchases || 0) + form.amount,
           updated_at: new Date().toISOString()
         })
         .eq('id', invoice.customer_id);
     }
 
-    toast({ title: 'Success', description: `Payment of ${formatCurrency(form.amount)} recorded` });
+    const descParts = [`Payment of ${formatCurrency(form.amount)} recorded`];
+    if (form.bad_debt_amount > 0) descParts.push(`bad debt write-off of ${formatCurrency(form.bad_debt_amount)}`);
+    toast({ title: 'Success', description: descParts.join(', ') });
     onSaved();
   }
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white rounded-t-2xl z-10">
           <h2 className="text-base font-bold">Record Payment</h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
         </div>
@@ -1592,8 +1630,34 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
 
           <div>
             <label className="block text-xs font-medium mb-1">Payment Amount *</label>
-            <input type="number" min="0.01" max={balance} step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: parseFloat(e.target.value) || 0 })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+            <input type="number" min="0" max={balance} step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: parseFloat(e.target.value) || 0 })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
           </div>
+
+          <div>
+            <label className="block text-xs font-medium mb-1 flex items-center gap-1">
+              Bad Debt Write-off
+              <span className="text-[10px] text-muted-foreground font-normal">(amount customer won&apos;t pay)</span>
+            </label>
+            <input type="number" min="0" max={balance} step="0.01" value={form.bad_debt_amount} onChange={e => setForm({ ...form, bad_debt_amount: parseFloat(e.target.value) || 0 })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+            {form.bad_debt_amount > 0 && (
+              <p className="text-[11px] text-orange-600 mt-1">
+                {formatCurrency(form.bad_debt_amount)} will be written off as bad debt. Outstanding will be reduced to {formatCurrency(Math.max(0, remainingAfterPayment))}.
+              </p>
+            )}
+          </div>
+
+          {remainingAfterPayment > 0.01 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-2.5 flex justify-between items-center">
+              <span className="text-xs text-amber-700">Remaining Outstanding</span>
+              <span className="text-xs font-bold text-amber-700">{formatCurrency(remainingAfterPayment)}</span>
+            </div>
+          )}
+          {remainingAfterPayment <= 0.01 && (form.amount > 0 || form.bad_debt_amount > 0) && (
+            <div className="bg-green-50 border border-green-200 rounded-lg p-2.5 flex justify-between items-center">
+              <span className="text-xs text-green-700">Invoice will be fully settled</span>
+              <CheckCircle2 className="w-4 h-4 text-green-600" />
+            </div>
+          )}
 
           <div>
             <label className="block text-xs font-medium mb-1">Payment Method *</label>

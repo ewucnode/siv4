@@ -6,8 +6,9 @@ import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency, formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { ArrowLeft, Phone, Mail, MapPin, Building, CreditCard, Calendar, ShoppingBag, DollarSign, Star, Pencil as Edit, Eye, Receipt, Truck, FileText, User, RotateCcw, Filter, Search, X } from 'lucide-react';
-import type { Customer, Invoice, Quotation, Delivery } from '@/lib/types';
+import { ArrowLeft, Phone, Mail, MapPin, Building, CreditCard, Calendar, ShoppingBag, DollarSign, Star, Pencil as Edit, Eye, Receipt, Truck, FileText, User, RotateCcw, Filter, Search, X, HandCoins } from 'lucide-react';
+import type { Customer, Invoice, Quotation, Delivery, Payment } from '@/lib/types';
+import CollectPaymentModal from '@/components/CollectPaymentModal';
 
 interface SalesReturn {
   id: string;
@@ -76,7 +77,9 @@ export default function CustomerDetailPage() {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [manualReceivables, setManualReceivables] = useState<ManualReceivable[]>([]);
   const [salesReturns, setSalesReturns] = useState<SalesReturn[]>([]);
-  const [activeTab, setActiveTab] = useState<'invoices' | 'quotations' | 'deliveries' | 'receivables' | 'returns'>('invoices');
+  const [activeTab, setActiveTab] = useState<'invoices' | 'payments' | 'quotations' | 'deliveries' | 'receivables' | 'returns'>('invoices');
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [showCollect, setShowCollect] = useState(false);
 
   // Receivables filter state
   const [receivablesFilter, setReceivablesFilter] = useState<'all' | 'invoice' | 'manual'>('all');
@@ -101,26 +104,28 @@ export default function CustomerDetailPage() {
     }
     setCustomer(custData);
 
-    const [invRes, invTotalsRes, quoteRes, delivRes, receivableRes, receivablePaymentsRes, returnsRes, creditRes] = await Promise.all([
+    const [invRes, invTotalsRes, quoteRes, delivRes, receivableRes, receivablePaymentsRes, returnsRes, creditRes, payRes] = await Promise.all([
       supabase.from('invoices').select('*').eq('customer_id', customerId).order('created_at', { ascending: false }).limit(20),
       supabase.from('invoices').select('total_amount').eq('customer_id', customerId).neq('status', 'cancelled'),
       supabase.from('quotations').select('*').eq('customer_id', customerId).order('created_at', { ascending: false }).limit(10),
       supabase.from('deliveries').select('*').eq('customer_id', customerId).order('created_at', { ascending: false }).limit(10),
       supabase.from('journal_entries').select('id, entry_number, entry_date, description, total_debit, created_at').eq('customer_id', customerId).eq('reference_type', 'receivable').eq('is_posted', true).order('entry_date', { ascending: false }),
-      supabase.from('payments').select('reference_id, amount').eq('reference_type', 'receivable'),
+      supabase.from('payments').select('reference_id, amount, bad_debt_amount').eq('reference_type', 'receivable'),
       supabase.from('sales_returns').select('*, invoice:invoices(invoice_number)').eq('customer_id', customerId).order('created_at', { ascending: false }),
       supabase.from('customer_store_credits').select('balance').eq('customer_id', customerId).eq('status', 'active'),
+      supabase.from('payments').select('*').eq('customer_id', customerId).order('payment_date', { ascending: false }).limit(50),
     ]);
 
     setInvoices(invRes.data || []);
     setQuotations(quoteRes.data || []);
     setDeliveries(delivRes.data || []);
+    setPayments((payRes.data || []) as Payment[]);
 
     // Calculate manual receivables with payments
     const receivablePaymentsMap = new Map<string, number>();
     (receivablePaymentsRes.data || []).forEach((p: any) => {
-      const current = receivablePaymentsMap.get(p.reference_id) || 0;
-      receivablePaymentsMap.set(p.reference_id, current + Number(p.amount));
+      const total = Number(p.amount) + Number(p.bad_debt_amount || 0);
+      receivablePaymentsMap.set(p.reference_id, (receivablePaymentsMap.get(p.reference_id) || 0) + total);
     });
 
     const receivablesWithPayments: ManualReceivable[] = (receivableRes.data || []).map((r: any) => {
@@ -232,9 +237,19 @@ export default function CustomerDetailPage() {
           <h1 className="text-2xl font-bold text-foreground">{customer.name}</h1>
           <p className="text-sm text-muted-foreground">{customer.code} - {customer.type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}</p>
         </div>
-        <Link href={`/crm?edit=${customer.id}`} className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">
-          <Edit className="w-4 h-4" />Edit
-        </Link>
+        <div className="flex items-center gap-2">
+          {Number(customer.outstanding_balance) > 0 && (
+            <button
+              onClick={() => setShowCollect(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-semibold transition"
+            >
+              <HandCoins className="w-4 h-4" />Collect Payment
+            </button>
+          )}
+          <Link href={`/crm?edit=${customer.id}`} className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">
+            <Edit className="w-4 h-4" />Edit
+          </Link>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -364,6 +379,7 @@ export default function CustomerDetailPage() {
             <div className="flex border-b border-border overflow-x-auto">
               {[
                 { key: 'invoices', label: 'Invoices', icon: Receipt },
+                { key: 'payments', label: `Payments${payments.length > 0 ? ` (${payments.length})` : ''}`, icon: HandCoins },
                 { key: 'returns', label: `Returns${salesReturns.length > 0 ? ` (${salesReturns.length})` : ''}`, icon: RotateCcw },
                 { key: 'receivables', label: 'Receivables', icon: User },
                 { key: 'quotations', label: 'Quotations', icon: FileText },
@@ -430,6 +446,83 @@ export default function CustomerDetailPage() {
                       </tbody>
                     </table>
                   )}
+                </div>
+              )}
+
+              {activeTab === 'payments' && (
+                <div className="space-y-4">
+                  {/* Payment summary cards */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-green-50 rounded-lg p-3">
+                      <p className="text-xs text-green-600 font-medium">Total Collected</p>
+                      <p className="text-lg font-bold text-green-700">{formatCurrency(payments.filter(p => p.payment_type === 'received').reduce((s, p) => s + Number(p.amount), 0))}</p>
+                    </div>
+                    <div className="bg-orange-50 rounded-lg p-3">
+                      <p className="text-xs text-orange-600 font-medium">Total Bad Debt</p>
+                      <p className="text-lg font-bold text-orange-700">{formatCurrency(payments.reduce((s, p) => s + Number(p.bad_debt_amount || 0), 0))}</p>
+                    </div>
+                    <div className="bg-blue-50 rounded-lg p-3">
+                      <p className="text-xs text-blue-600 font-medium">Total Payments</p>
+                      <p className="text-lg font-bold text-blue-700">{payments.length}</p>
+                    </div>
+                  </div>
+
+                  {/* Payments table */}
+                  <div className="overflow-x-auto">
+                    {payments.length === 0 ? (
+                      <div className="text-center py-8 text-muted-foreground text-sm">
+                        <HandCoins className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                        No payments recorded yet
+                      </div>
+                    ) : (
+                      <table className="w-full">
+                        <thead>
+                          <tr className="border-b border-border">
+                            <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Payment #</th>
+                            <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Date</th>
+                            <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Type</th>
+                            <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Ref</th>
+                            <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Method</th>
+                            <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2">Amount</th>
+                            <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2">Bad Debt</th>
+                            <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Reference #</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {payments.map(p => (
+                            <tr key={p.id} className="hover:bg-muted/30">
+                              <td className="px-3 py-2 text-sm font-semibold text-blue-600">{p.payment_number}</td>
+                              <td className="px-3 py-2 text-sm text-muted-foreground">{formatDate(p.payment_date)}</td>
+                              <td className="px-3 py-2">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${p.reference_type === 'invoice' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'}`}>
+                                  {p.reference_type}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-sm capitalize text-muted-foreground">{p.payment_type}</td>
+                              <td className="px-3 py-2 text-sm capitalize text-muted-foreground">{p.payment_method.replace(/_/g, ' ')}</td>
+                              <td className="px-3 py-2 text-sm text-right font-semibold text-green-600">{formatCurrency(Number(p.amount))}</td>
+                              <td className="px-3 py-2 text-sm text-right font-semibold">
+                                {Number(p.bad_debt_amount || 0) > 0 ? (
+                                  <span className="text-orange-600">{formatCurrency(Number(p.bad_debt_amount))}</span>
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-sm text-muted-foreground">{p.reference_number || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-muted/40 border-t-2 border-border">
+                            <td colSpan={5} className="px-3 py-2 text-sm font-semibold text-muted-foreground">Total</td>
+                            <td className="px-3 py-2 text-sm text-right font-bold text-green-600">{formatCurrency(payments.filter(p => p.payment_type === 'received').reduce((s, p) => s + Number(p.amount), 0))}</td>
+                            <td className="px-3 py-2 text-sm text-right font-bold text-orange-600">{formatCurrency(payments.reduce((s, p) => s + Number(p.bad_debt_amount || 0), 0))}</td>
+                            <td></td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -689,6 +782,17 @@ export default function CustomerDetailPage() {
           </div>
         </div>
       </div>
+      {showCollect && customer && (
+        <CollectPaymentModal
+          customerId={customer.id}
+          customerName={customer.name}
+          totalOutstanding={Number(customer.outstanding_balance) || 0}
+          invoiceOutstanding={stats.totalOutstanding}
+          manualOutstanding={stats.manualReceivablesOutstanding}
+          onClose={() => setShowCollect(false)}
+          onSaved={() => { setShowCollect(false); loadCustomerData(); }}
+        />
+      )}
     </div>
   );
 }
