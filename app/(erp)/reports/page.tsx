@@ -39,26 +39,37 @@ export default function ReportsPage() {
   const [topProducts, setTopProducts] = useState<{ name: string; sales: number; revenue: number; cost: number; profit: number; unit?: string }[]>([]);
   const [topCustomers, setTopCustomers] = useState<{ name: string; purchases: number; revenue: number }[]>([]);
 
-  useEffect(() => { loadReportData(); }, [period, dateFrom, dateTo]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => { loadReportData(); }, [period, dateFrom, dateTo, refreshKey]);
 
   async function loadReportData() {
     setLoading(true);
     const { startDate, endDate } = getDateRange(period);
     const effectiveStart = dateFrom || startDate;
-    const effectiveEnd = dateTo || endDate || undefined;
+    // When dateTo is not set and endDate is null (open-ended ranges like this_month/quarter/year),
+    // use today as the upper bound instead of undefined — passing undefined to .lte() breaks Supabase queries.
+    const today = new Date().toISOString().split('T')[0];
+    const effectiveEnd = dateTo || endDate || today;
+
+    // Build query helpers that only apply .lte when we have a real end date
+    const applyDateRange = (query: any, column: string) => {
+      let q = query.gte(column, effectiveStart);
+      if (effectiveEnd) q = q.lte(column, effectiveEnd);
+      return q;
+    };
 
     // Supabase caps queries at 1000 rows by default. Paginate inventory_items to fetch all.
     const [
       invoicesRes, purchasesRes, customersRes, productsRes,
       topProductsRes, topCustomersRes, paymentsRes, accountsRes
     ] = await Promise.all([
-      supabase.from('invoices').select('total_amount, subtotal, invoice_date, status').gte('invoice_date', effectiveStart).lte('invoice_date', effectiveEnd || undefined).neq('status', 'cancelled'),
-      supabase.from('purchase_orders').select('total_amount').gte('order_date', effectiveStart).lte('order_date', effectiveEnd || undefined),
+      applyDateRange(supabase.from('invoices').select('total_amount, subtotal, invoice_date, status').neq('status', 'cancelled'), 'invoice_date'),
+      applyDateRange(supabase.from('purchase_orders').select('total_amount'), 'order_date'),
       supabase.from('customers').select('total_purchases'),
       supabase.from('products').select('id, unit'),
-      supabase.from('invoice_items').select('product_id, quantity, subtotal, unit_name, product:products(name, cost_price)').gte('created_at', effectiveStart).lte('created_at', effectiveEnd || undefined).order('quantity', { ascending: false }).limit(50),
+      applyDateRange(supabase.from('invoice_items').select('product_id, quantity, subtotal, unit_name, product:products(name, cost_price)').order('quantity', { ascending: false }).limit(50), 'created_at'),
       supabase.from('customers').select('name, total_purchases').order('total_purchases', { ascending: false }).limit(10),
-      supabase.from('payments').select('amount').eq('payment_type', 'received').gte('payment_date', effectiveStart).lte('payment_date', effectiveEnd || undefined),
+      applyDateRange(supabase.from('payments').select('amount').eq('payment_type', 'received'), 'payment_date'),
       supabase.from('accounts').select('id, code, name, account_type').eq('is_active', true),
     ]);
 
@@ -92,7 +103,10 @@ export default function ReportsPage() {
         .eq('account_id', cogsAccount.id);
       cogsActual = (cogsLines || []).filter((l: any) => {
         const d = l.journal_entry?.entry_date;
-        return d && d >= effectiveStart && (!effectiveEnd || d <= effectiveEnd);
+        if (!d) return false;
+        if (d < effectiveStart) return false;
+        if (effectiveEnd && d > effectiveEnd) return false;
+        return true;
       }).reduce((s: number, l: any) => s + Number(l.debit || 0) - Number(l.credit || 0), 0);
     }
 
@@ -108,7 +122,10 @@ export default function ReportsPage() {
         .eq('account_id', salesReturnsAccount.id);
       salesReturnsTotal = (srLines || []).filter((l: any) => {
         const d = l.journal_entry?.entry_date;
-        return d && d >= effectiveStart && (!effectiveEnd || d <= effectiveEnd);
+        if (!d) return false;
+        if (d < effectiveStart) return false;
+        if (effectiveEnd && d > effectiveEnd) return false;
+        return true;
       }).reduce((s: number, l: any) => s + Number(l.debit || 0) - Number(l.credit || 0), 0);
     }
 
@@ -128,7 +145,10 @@ export default function ReportsPage() {
         .eq('account_id', acc.id);
       const netDebit = (opexLines || []).filter((l: any) => {
         const d = l.journal_entry?.entry_date;
-        return d && d >= effectiveStart && (!effectiveEnd || d <= effectiveEnd);
+        if (!d) return false;
+        if (d < effectiveStart) return false;
+        if (effectiveEnd && d > effectiveEnd) return false;
+        return true;
       }).reduce((s: number, l: any) => s + Number(l.debit || 0) - Number(l.credit || 0), 0);
       totalOperatingExpenses += Math.max(0, netDebit);
     }
@@ -231,11 +251,12 @@ export default function ReportsPage() {
   }
 
   async function getCategoryRevenue(startDate: string, endDate: string | null) {
-    const { data } = await supabase
+    let query = supabase
       .from('invoice_items')
       .select('subtotal, product:products(category:categories(name))')
-      .gte('created_at', startDate)
-      .lte('created_at', endDate || undefined);
+      .gte('created_at', startDate);
+    if (endDate) query = query.lte('created_at', endDate);
+    const { data } = await query;
 
     const catTotals: Record<string, number> = {};
     (data || []).forEach((item: any) => {
@@ -315,7 +336,7 @@ export default function ReportsPage() {
               <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="border border-border rounded-lg px-2 py-1.5 text-sm focus:outline-none" />
             </div>
           )}
-          <button onClick={loadReportData} className="flex items-center gap-1.5 border border-border px-3 py-2 rounded-lg text-sm hover:bg-muted transition">
+          <button onClick={() => setRefreshKey(k => k + 1)} className="flex items-center gap-1.5 border border-border px-3 py-2 rounded-lg text-sm hover:bg-muted transition">
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
           <button onClick={handlePrint} className="flex items-center gap-1.5 border border-border px-3 py-2 rounded-lg text-sm hover:bg-muted transition">

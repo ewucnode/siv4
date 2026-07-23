@@ -775,8 +775,8 @@ function RecordReceivableModal({ accounts, onSaved, onClose }: { accounts: Accou
       }).select().single();
       if (entryError) throw entryError;
 
-      const revenueAccount = accounts.find(a => a.code === '4000');
-      if (!arAccount || !revenueAccount) throw new Error('Required accounts (1100, 4000) not found');
+      const revenueAccount = accounts.find(a => a.code === '4100');
+      if (!arAccount || !revenueAccount) throw new Error('Required accounts (1100, 4100) not found');
 
       await supabase.from('journal_lines').insert([
         { journal_entry_id: entry.id, account_id: arAccount.id, description: desc, debit: amount, credit: 0, sort_order: 0 },
@@ -832,7 +832,7 @@ function RecordReceivableModal({ accounts, onSaved, onClose }: { accounts: Accou
             </div>
           </div>
           <div className="bg-muted/30 rounded-lg p-3 text-xs text-muted-foreground">
-            Dr. Accounts Receivable ({arAccount?.code}) &rarr; Cr. Sales Revenue (4000)
+            Dr. Accounts Receivable ({arAccount?.code}) &rarr; Cr. Service Revenue (4100)
           </div>
           <div>
             <label className="block text-xs font-medium mb-1">Description</label>
