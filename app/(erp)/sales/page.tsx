@@ -1628,54 +1628,6 @@ function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWit
 
     if (invError) { setError(invError.message); setSaving(false); return; }
 
-    // Post bad debt journal entry: Dr. Bad Debt Expense (5600) / Cr. Accounts Receivable (1100)
-    if (form.bad_debt_amount > 0) {
-      const { data: badDebtAccount } = await supabase.from('accounts').select('id').eq('code', '5600').maybeSingle();
-      const { data: arAccount } = await supabase.from('accounts').select('id').eq('code', '1100').maybeSingle();
-      const { data: jeNum } = await supabase.rpc('get_next_journal_number');
-      const journalNumber = jeNum || `JE-${Date.now().toString().slice(-6)}`;
-
-      if (badDebtAccount && arAccount) {
-        const { error: jeError } = await supabase.from('journal_entries').insert({
-          journal_number: journalNumber,
-          entry_date: form.payment_date,
-          description: `Bad debt write-off for invoice ${invoice.invoice_number}`,
-          reference_type: 'invoice',
-          reference_id: invoice.id,
-          customer_id: invoice.customer_id,
-        });
-        if (!jeError) {
-          const { data: jeRow } = await supabase.from('journal_entries').select('id').eq('journal_number', journalNumber).maybeSingle();
-          if (jeRow) {
-            await supabase.from('journal_lines').insert([
-              { journal_entry_id: jeRow.id, account_id: badDebtAccount.id, debit: form.bad_debt_amount, credit: 0, description: `Bad debt write-off - ${invoice.invoice_number}` },
-              { journal_entry_id: jeRow.id, account_id: arAccount.id, debit: 0, credit: form.bad_debt_amount, description: `AR reduction - bad debt - ${invoice.invoice_number}` },
-            ]);
-            await supabase.rpc('increment_account_balance', { p_account_id: badDebtAccount.id, p_amount: form.bad_debt_amount });
-            await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_amount: -form.bad_debt_amount });
-          }
-        }
-      }
-    }
-
-    // Update customer outstanding balance (reduce by payment + bad debt)
-    const { data: currentCustomer } = await supabase
-      .from('customers')
-      .select('outstanding_balance, total_purchases')
-      .eq('id', invoice.customer_id)
-      .single();
-
-    if (currentCustomer) {
-      await supabase
-        .from('customers')
-        .update({
-          outstanding_balance: Math.max(0, (currentCustomer.outstanding_balance || 0) - form.amount - form.bad_debt_amount),
-          total_purchases: (currentCustomer.total_purchases || 0) + form.amount,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', invoice.customer_id);
-    }
-
     const descParts = [`Payment of ${formatCurrency(form.amount)} recorded`];
     if (form.bad_debt_amount > 0) descParts.push(`bad debt write-off of ${formatCurrency(form.bad_debt_amount)}`);
     toast({ title: 'Success', description: descParts.join(', ') });

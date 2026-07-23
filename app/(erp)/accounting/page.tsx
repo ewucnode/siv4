@@ -394,11 +394,11 @@ export default function AccountingPage() {
                 </tr>
               ) : (
                 accounts.map(a => (
-                  <tr key={a.id} className="hover:bg-muted/30 transition-colors">
+                  <tr key={a.id} className="hover:bg-muted/30 transition-colors cursor-pointer" onClick={() => window.location.href = `/accounting/accounts/${a.id}`}>
                     <td className="px-4 py-3 text-sm font-mono text-muted-foreground">{a.code}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-foreground">{a.name}</span>
+                        <span className="text-sm font-medium text-foreground hover:text-blue-600 transition">{a.name}</span>
                         {a.is_cash && <span className="badge-status bg-green-50 text-green-600">Cash</span>}
                         {a.is_bank && <span className="badge-status bg-blue-50 text-blue-600">Bank</span>}
                       </div>

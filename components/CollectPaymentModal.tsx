@@ -154,13 +154,8 @@ export default function CollectPaymentModal({
       .eq('id', selectedInvoice.id);
     if (invError) throw invError;
 
-    // Bad debt journal entry
-    if (form.bad_debt_amount > 0) {
-      await postBadDebtJournal(form.bad_debt_amount, form.payment_date, `Bad debt write-off for invoice ${selectedInvoice.invoice_number}`, customerId, 'invoice', selectedInvoice.id);
-    }
-
-    // Update customer outstanding
-    await updateCustomerOutstanding(customerId, form.amount + form.bad_debt_amount, form.amount);
+    // Database triggers handle: payment JE (Cash→AR), bad debt JE (5600→AR),
+    // and customer outstanding balance recalculation automatically.
 
     const descParts = [`Payment of ${formatCurrency(form.amount)} recorded`];
     if (form.bad_debt_amount > 0) descParts.push(`bad debt write-off of ${formatCurrency(form.bad_debt_amount)}`);
@@ -254,14 +249,15 @@ export default function CollectPaymentModal({
       }
 
       if (badDebtForThis > 0) {
-        await postBadDebtJournal(badDebtForThis, form.payment_date, `Bad debt write-off for ${entry.entry_number}`, customerId, 'receivable', entry.id);
+        await postBadDebtJournal(badDebtForThis, form.payment_date, `Bad debt write-off for ${entry.entry_number}`, customerId);
       }
 
       amountRemaining -= payForThis;
       badDebtRemaining -= badDebtForThis;
     }
 
-    // Update customer outstanding
+    // Update customer outstanding balance for manual receivables
+    // (the DB trigger only recalculates for invoice payments, not receivable type)
     await updateCustomerOutstanding(customerId, form.amount + form.bad_debt_amount, form.amount);
 
     const descParts = [`Manual payment of ${formatCurrency(form.amount)} recorded`];
@@ -271,7 +267,7 @@ export default function CollectPaymentModal({
     onClose();
   }
 
-  async function postBadDebtJournal(amount: number, date: string, description: string, custId: string, refType: string, refId: string) {
+  async function postBadDebtJournal(amount: number, date: string, description: string, custId: string) {
     const { data: badDebtAccount } = await supabase.from('accounts').select('id').eq('code', '5600').maybeSingle();
     const { data: arAccount } = await supabase.from('accounts').select('id').eq('code', '1100').maybeSingle();
     const { data: jeNum } = await supabase.rpc('get_next_journal_number');
