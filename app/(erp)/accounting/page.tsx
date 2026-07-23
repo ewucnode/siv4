@@ -138,18 +138,19 @@ export default function AccountingPage() {
 
     // Load manual receivables
     const { data: receivableEntries } = await supabase.from('journal_entries')
-      .select('id, entry_number, entry_date, description, total_debit')
+      .select('id, entry_number, entry_date, description, total_debit, customer_id')
       .eq('is_posted', true)
       .eq('reference_type', 'receivable')
       .order('entry_date', { ascending: false });
 
     const { data: receivablePayments } = await supabase.from('payments')
-      .select('reference_id, amount')
+      .select('reference_id, amount, bad_debt_amount')
       .eq('reference_type', 'receivable');
 
     const receivablePaymentsMap = new Map<string, number>();
-    (receivablePayments || []).forEach(p => {
-      receivablePaymentsMap.set(p.reference_id, (receivablePaymentsMap.get(p.reference_id) || 0) + Number(p.amount));
+    (receivablePayments || []).forEach((p: any) => {
+      const total = Number(p.amount) + Number(p.bad_debt_amount || 0);
+      receivablePaymentsMap.set(p.reference_id, (receivablePaymentsMap.get(p.reference_id) || 0) + total);
     });
 
     const receivablesList: ManualReceivablePayable[] = [];
@@ -168,6 +169,7 @@ export default function AccountingPage() {
           paid_amount: paidAmount,
           outstanding_balance: outstanding,
           party_name: lineData?.description?.replace('Receivable from ', '') || entry.description || 'Customer',
+          party_id: (entry as any).customer_id || undefined,
         });
       }
     }
@@ -392,11 +394,11 @@ export default function AccountingPage() {
                 </tr>
               ) : (
                 accounts.map(a => (
-                  <tr key={a.id} className="hover:bg-muted/30 transition-colors">
+                  <tr key={a.id} className="hover:bg-muted/30 transition-colors cursor-pointer" onClick={() => window.location.href = `/accounting/accounts/${a.id}`}>
                     <td className="px-4 py-3 text-sm font-mono text-muted-foreground">{a.code}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-foreground">{a.name}</span>
+                        <span className="text-sm font-medium text-foreground hover:text-blue-600 transition">{a.name}</span>
                         {a.is_cash && <span className="badge-status bg-green-50 text-green-600">Cash</span>}
                         {a.is_bank && <span className="badge-status bg-blue-50 text-blue-600">Bank</span>}
                       </div>
@@ -961,22 +963,26 @@ function RecordPayableModal({ accounts, onSaved, onClose }: { accounts: Account[
 }
 
 function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }: { receivable: ManualReceivablePayable; accounts: Account[]; onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState({ amount: receivable.outstanding_balance, payment_date: new Date().toISOString().split('T')[0], payment_method: 'cash', account_id: '', reference_number: '', notes: '' });
+  const [form, setForm] = useState({ amount: receivable.outstanding_balance, bad_debt_amount: 0, payment_date: new Date().toISOString().split('T')[0], payment_method: 'cash', account_id: '', reference_number: '', notes: '' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   const arAccount = accounts.find(a => a.code === '1100');
+  const badDebtAccount = accounts.find(a => a.code === '5600');
   const cashBankAccounts = accounts.filter(a => a.is_cash || a.is_bank);
+  const remainingAfter = receivable.outstanding_balance - form.amount - form.bad_debt_amount;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
-    if (!form.account_id || form.amount <= 0) { setError('Please select a cash/bank account and enter a valid amount'); return; }
-    if (form.amount > receivable.outstanding_balance) { setError(`Amount cannot exceed outstanding balance (${formatCurrency(receivable.outstanding_balance)})`); return; }
+    if (form.amount <= 0 && form.bad_debt_amount <= 0) { setError('Payment amount or bad debt amount must be greater than 0'); return; }
+    if (form.amount + form.bad_debt_amount > receivable.outstanding_balance + 0.01) { setError(`Payment + bad debt cannot exceed outstanding balance (${formatCurrency(receivable.outstanding_balance)})`); return; }
+    if (form.amount > 0 && !form.account_id) { setError('Please select a cash/bank account'); return; }
 
     setSaving(true);
     try {
       const amount = form.amount;
+      const badDebt = form.bad_debt_amount;
       const desc = form.notes || `Payment received for ${receivable.entry_number}`;
       const { data: jeNum } = await supabase.rpc('get_next_journal_number');
 
@@ -985,7 +991,9 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
         payment_type: 'received',
         reference_type: 'receivable',
         reference_id: receivable.id,
+        customer_id: receivable.party_id || null,
         amount,
+        bad_debt_amount: badDebt,
         payment_method: form.payment_method,
         payment_date: form.payment_date,
         reference_number: form.reference_number || null,
@@ -993,28 +1001,73 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
       });
       if (payError) throw payError;
 
-      const { data: entry, error: entryError } = await supabase.from('journal_entries').insert({
-        entry_number: jeNum || `JE-${Date.now().toString().slice(-6)}`,
-        entry_date: form.payment_date,
-        description: desc,
-        reference_type: 'payment',
-        total_debit: amount,
-        total_credit: amount,
-        is_posted: true,
-      }).select().single();
-      if (entryError) throw entryError;
-
       if (!arAccount) throw new Error('Accounts Receivable account not found');
-      await supabase.from('journal_lines').insert([
-        { journal_entry_id: entry.id, account_id: form.account_id, description: desc, debit: amount, credit: 0, sort_order: 0 },
-        { journal_entry_id: entry.id, account_id: arAccount.id, description: desc, debit: 0, credit: amount, sort_order: 1 },
-      ]);
 
-      // Atomic balance updates
-      await supabase.rpc('increment_account_balance', { p_account_id: form.account_id, p_delta: amount });
-      await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: -amount });
+      // Payment journal entry: Dr. Cash/Bank / Cr. AR
+      if (amount > 0) {
+        const { data: entry, error: entryError } = await supabase.from('journal_entries').insert({
+          entry_number: jeNum || `JE-${Date.now().toString().slice(-6)}`,
+          entry_date: form.payment_date,
+          description: desc,
+          reference_type: 'payment',
+          total_debit: amount,
+          total_credit: amount,
+          is_posted: true,
+        }).select().single();
+        if (entryError) throw entryError;
 
-      toast({ title: 'Success', description: `Payment of ${formatCurrency(amount)} recorded` });
+        await supabase.from('journal_lines').insert([
+          { journal_entry_id: entry.id, account_id: form.account_id, description: desc, debit: amount, credit: 0, sort_order: 0 },
+          { journal_entry_id: entry.id, account_id: arAccount.id, description: desc, debit: 0, credit: amount, sort_order: 1 },
+        ]);
+
+        await supabase.rpc('increment_account_balance', { p_account_id: form.account_id, p_delta: amount });
+        await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: -amount });
+      }
+
+      // Bad debt journal entry: Dr. Bad Debt Expense (5600) / Cr. AR (1100)
+      if (badDebt > 0) {
+        const { data: jeNum2 } = await supabase.rpc('get_next_journal_number');
+        const { data: bdEntry, error: bdEntryError } = await supabase.from('journal_entries').insert({
+          entry_number: jeNum2 || `JE-${Date.now().toString().slice(-6)}`,
+          entry_date: form.payment_date,
+          description: `Bad debt write-off for ${receivable.entry_number}`,
+          reference_type: 'payment',
+          total_debit: badDebt,
+          total_credit: badDebt,
+          is_posted: true,
+        }).select().single();
+        if (bdEntryError) throw bdEntryError;
+
+        if (badDebtAccount) {
+          await supabase.from('journal_lines').insert([
+            { journal_entry_id: bdEntry.id, account_id: badDebtAccount.id, description: `Bad debt write-off - ${receivable.party_name || ''}`, debit: badDebt, credit: 0, sort_order: 0 },
+            { journal_entry_id: bdEntry.id, account_id: arAccount.id, description: `AR reduction - bad debt`, debit: 0, credit: badDebt, sort_order: 1 },
+          ]);
+          await supabase.rpc('increment_account_balance', { p_account_id: badDebtAccount.id, p_delta: badDebt });
+        } else {
+          // Still need to credit AR even if bad debt expense account is missing
+          await supabase.from('journal_lines').insert([
+            { journal_entry_id: bdEntry.id, account_id: arAccount.id, description: `AR reduction - bad debt`, debit: 0, credit: badDebt, sort_order: 0 },
+          ]);
+        }
+        await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: -badDebt });
+      }
+
+      // Update customer outstanding balance (reduce by payment + bad debt)
+      if (receivable.party_id) {
+        const { data: customer } = await supabase.from('customers').select('outstanding_balance, total_purchases').eq('id', receivable.party_id).single();
+        if (customer) {
+          await supabase.from('customers').update({
+            outstanding_balance: Math.max(0, (customer.outstanding_balance || 0) - amount - badDebt),
+            total_purchases: (customer.total_purchases || 0) + amount,
+          }).eq('id', receivable.party_id);
+        }
+      }
+
+      const descParts = [`Payment of ${formatCurrency(amount)} recorded`];
+      if (badDebt > 0) descParts.push(`bad debt write-off of ${formatCurrency(badDebt)}`);
+      toast({ title: 'Success', description: descParts.join(', ') });
       onSaved();
       onClose();
     } catch (err: any) {
@@ -1026,8 +1079,8 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white rounded-t-2xl z-10">
           <h2 className="text-base font-bold flex items-center gap-2"><HandCoins className="w-4 h-4 text-green-600" />Collect Receivable Payment</h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
         </div>
@@ -1041,12 +1094,25 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium mb-1">Amount *</label>
-              <input type="number" required min="0.01" max={receivable.outstanding_balance} step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: parseFloat(e.target.value) || 0 })} className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
+              <input type="number" required min="0" max={receivable.outstanding_balance} step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: parseFloat(e.target.value) || 0 })} className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
             </div>
             <div>
-              <label className="block text-xs font-medium mb-1">Date</label>
-              <input type="date" value={form.payment_date} onChange={e => setForm({ ...form, payment_date: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
+              <label className="block text-xs font-medium mb-1 flex items-center gap-1">Bad Debt<span className="text-[10px] text-muted-foreground font-normal">(won&apos;t pay)</span></label>
+              <input type="number" min="0" max={receivable.outstanding_balance} step="0.01" value={form.bad_debt_amount} onChange={e => setForm({ ...form, bad_debt_amount: parseFloat(e.target.value) || 0 })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
             </div>
+          </div>
+          {form.bad_debt_amount > 0 && (
+            <p className="text-[11px] text-orange-600">{formatCurrency(form.bad_debt_amount)} will be written off as bad debt. Outstanding will be reduced to {formatCurrency(Math.max(0, remainingAfter))}.</p>
+          )}
+          {remainingAfter <= 0.01 && (form.amount > 0 || form.bad_debt_amount > 0) && (
+            <div className="bg-green-50 border border-green-200 rounded-lg p-2.5 flex justify-between items-center">
+              <span className="text-xs text-green-700">Receivable will be fully settled</span>
+              <CheckCircle2 className="w-4 h-4 text-green-600" />
+            </div>
+          )}
+          <div>
+            <label className="block text-xs font-medium mb-1">Date</label>
+            <input type="date" value={form.payment_date} onChange={e => setForm({ ...form, payment_date: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -1070,7 +1136,7 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
             <label className="block text-xs font-medium mb-1">Reference / Notes</label>
             <input value={form.reference_number} onChange={e => setForm({ ...form, reference_number: e.target.value })} placeholder="Cheque no., Transaction ID..." className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
           </div>
-          <div className="bg-muted/30 rounded-lg p-3 text-xs text-muted-foreground">Dr. Cash/Bank &rarr; Cr. Accounts Receivable (1100)</div>
+          <div className="bg-muted/30 rounded-lg p-3 text-xs text-muted-foreground">Dr. Cash/Bank &rarr; Cr. Accounts Receivable (1100){form.bad_debt_amount > 0 && ' + Dr. Bad Debt (5600) → Cr. AR'}</div>
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
             <button type="submit" disabled={saving} className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-60">{saving ? 'Saving...' : 'Record Payment'}</button>

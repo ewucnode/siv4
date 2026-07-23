@@ -4,8 +4,9 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Plus, X, Edit, Trash2 } from 'lucide-react';
+import { Plus, X, CreditCard as Edit, Trash2, ExternalLink } from 'lucide-react';
 import type { Account } from '@/lib/types';
+import Link from 'next/link';
 
 const typeColors: Record<string, string> = {
   asset: 'text-blue-600 bg-blue-50',
@@ -85,12 +86,17 @@ export default function AccountsPage() {
               ) : accounts.map(a => (
                 <tr key={a.id} className={`hover:bg-muted/30 transition-colors ${!a.is_active ? 'opacity-50' : ''}`}>
                   <td className="px-4 py-3 font-mono text-sm text-muted-foreground">{a.code}</td>
-                  <td className="px-4 py-3 text-sm font-semibold text-foreground">{a.name}</td>
+                  <td className="px-4 py-3">
+                    <Link href={`/accounting/accounts/${a.id}`} className="text-sm font-semibold text-foreground hover:text-blue-600 transition">{a.name}</Link>
+                  </td>
                   <td className="px-4 py-3"><span className={`badge-status ${typeColors[a.account_type] || 'bg-gray-100 text-gray-600'} capitalize`}>{a.account_type}</span></td>
-                  <td className={`px-4 py-3 text-sm font-bold ${a.account_type === 'expense' || a.account_type === 'liability' ? 'text-red-600' : 'text-green-600'}`}>{formatCurrency(a.balance)}</td>
+                  <td className={`px-4 py-3 text-sm font-bold ${a.account_type === 'expense' || a.account_type === 'liability' ? 'text-red-600' : 'text-green-600'}`}>
+                    <Link href={`/accounting/accounts/${a.id}`} className="hover:underline">{formatCurrency(a.balance)}</Link>
+                  </td>
                   <td className="px-4 py-3 text-sm">{a.is_cash ? 'Cash' : a.is_bank ? 'Bank' : '-'}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1">
+                      <Link href={`/accounting/accounts/${a.id}`} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition" title="View Details"><ExternalLink className="w-3.5 h-3.5" /></Link>
                       <button onClick={() => setEditingAccount(a)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition"><Edit className="w-3.5 h-3.5" /></button>
                       <button onClick={() => setDeletingAccount(a)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition"><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>

@@ -4,9 +4,10 @@ import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Users, Plus, Search, CreditCard as Edit, Trash2, Phone, Mail, X, HardHat, Building2, Star, Palette, Eye, RotateCcw, Filter, ChevronDown } from 'lucide-react';
+import { Users, Plus, Search, CreditCard as Edit, Trash2, Phone, Mail, X, HardHat, Building2, Star, Palette, Eye, RotateCcw, Filter, ChevronDown, HandCoins } from 'lucide-react';
 import Link from 'next/link';
 import type { Customer, CustomerType } from '@/lib/types';
+import CollectPaymentModal from '@/components/CollectPaymentModal';
 
 const typeConfig: Record<CustomerType, { label: string; color: string; icon: React.ElementType }> = {
   retail: { label: 'Retail', color: 'bg-gray-100 text-gray-700', icon: Users },
@@ -53,6 +54,7 @@ export default function CRMPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [deletingCustomer, setDeletingCustomer] = useState<Customer | null>(null);
+  const [collectingCustomer, setCollectingCustomer] = useState<CustomerWithOutstanding | null>(null);
   const [stats, setStats] = useState({ total: 0, totalRevenue: 0, outstanding: 0, active: 0, totalRefunds: 0 });
 
   useEffect(() => { loadData(); }, []);
@@ -385,6 +387,9 @@ export default function CRMPage() {
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <Link href={`/crm/${c.id}`} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition" title="View Details"><Eye className="w-3.5 h-3.5" /></Link>
+                        {Number(c.outstanding_balance) > 0 && (
+                          <button onClick={() => setCollectingCustomer(c)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-green-50 text-muted-foreground hover:text-green-600 transition" title="Collect Payment"><HandCoins className="w-3.5 h-3.5" /></button>
+                        )}
                         <button onClick={() => setEditingCustomer(c)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition" title="Edit"><Edit className="w-3.5 h-3.5" /></button>
                         <button onClick={() => setDeletingCustomer(c)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition" title="Deactivate"><Trash2 className="w-3.5 h-3.5" /></button>
                       </div>
@@ -407,6 +412,17 @@ export default function CRMPage() {
           name={deletingCustomer.name}
           onClose={() => setDeletingCustomer(null)}
           onConfirm={handleDelete}
+        />
+      )}
+      {collectingCustomer && (
+        <CollectPaymentModal
+          customerId={collectingCustomer.id}
+          customerName={collectingCustomer.name}
+          totalOutstanding={Number(collectingCustomer.outstanding_balance) || 0}
+          invoiceOutstanding={collectingCustomer.invoice_outstanding}
+          manualOutstanding={collectingCustomer.manual_outstanding}
+          onClose={() => setCollectingCustomer(null)}
+          onSaved={loadData}
         />
       )}
     </div>
