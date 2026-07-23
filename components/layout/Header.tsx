@@ -146,8 +146,29 @@ export default function Header({ onMenuToggle }: HeaderProps) {
 
   return (
     <header className="h-14 bg-white border-b border-border flex items-center px-4 gap-4 sticky top-0 z-30">
+      {/* Quick Actions */}
+      <div className="hidden md:flex items-center gap-1 ml-auto">
+        {[
+          { href: '/inventory', icon: Package, label: 'Products', color: 'hover:bg-blue-50 hover:text-blue-600' },
+          { href: '/crm', icon: Users, label: 'Customers', color: 'hover:bg-teal-50 hover:text-teal-600' },
+          { href: '/sales', icon: Receipt, label: 'Invoices', color: 'hover:bg-green-50 hover:text-green-600' },
+          { href: '/sales/pos', icon: ShoppingCart, label: 'POS', color: 'hover:bg-amber-50 hover:text-amber-600' },
+          { href: '/quotations', icon: FileText, label: 'Quotations', color: 'hover:bg-orange-50 hover:text-orange-600' },
+          { href: '/purchases', icon: ShoppingBag, label: 'Purchases', color: 'hover:bg-purple-50 hover:text-purple-600' },
+        ].map((action) => (
+          <Link
+            key={action.href}
+            href={action.href}
+            title={action.label}
+            className={`w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground transition-colors ${action.color}`}
+          >
+            <action.icon className="w-4 h-4" />
+          </Link>
+        ))}
+      </div>
+
       {/* Date range badge */}
-      <div className="hidden lg:flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 border border-border px-2.5 py-1.5 rounded-lg ml-auto">
+      <div className="hidden lg:flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 border border-border px-2.5 py-1.5 rounded-lg">
         <span>
           {new Date(new Date().getFullYear(), new Date().getMonth(), 1).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
         </span>

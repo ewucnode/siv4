@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatRelativeTime, formatDate } from '@/lib/format';
 import { ArrowUpDown, TrendingUp, TrendingDown, Package, Search, X, Filter, ChevronLeft, ChevronRight, Calendar, Download } from 'lucide-react';
+import Link from 'next/link';
 
 const typeConfig: Record<string, { label: string; color: string; bg: string; sign: string }> = {
   purchase: { label: 'Purchase', color: 'text-green-600', bg: 'bg-green-50', sign: '+' },
@@ -40,6 +41,7 @@ const PAGE_SIZE = 25;
 export default function StockMovementsPage() {
   const [allMovements, setAllMovements] = useState<any[]>([]);
   const [warehouses, setWarehouses] = useState<any[]>([]);
+  const [productStocks, setProductStocks] = useState<Record<string, { warehouse_id: string; warehouse_name: string; qty: number }[]>>({});
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<FilterState>(initialFilters);
   const [currentPage, setCurrentPage] = useState(1);
@@ -53,6 +55,26 @@ export default function StockMovementsPage() {
       ]);
       setAllMovements(movRes.data || []);
       setWarehouses(whRes.data || []);
+
+      // Fetch current stock per product across warehouses
+      const productIds = [...new Set((movRes.data || []).map((m: any) => m.product_id).filter(Boolean))];
+      if (productIds.length > 0) {
+        const { data: invData } = await supabase
+          .from('inventory_items')
+          .select('product_id, warehouse_id, quantity_on_hand, warehouse:warehouses(name)')
+          .in('product_id', productIds);
+        const stocks: Record<string, { warehouse_id: string; warehouse_name: string; qty: number }[]> = {};
+        (invData || []).forEach((inv: any) => {
+          if (!stocks[inv.product_id]) stocks[inv.product_id] = [];
+          stocks[inv.product_id].push({
+            warehouse_id: inv.warehouse_id,
+            warehouse_name: inv.warehouse?.name || '—',
+            qty: Number(inv.quantity_on_hand),
+          });
+        });
+        setProductStocks(stocks);
+      }
+
       setLoading(false);
     }
     load();
@@ -334,7 +356,24 @@ export default function StockMovementsPage() {
               const cfg = typeConfig[m.movement_type] || typeConfig.adjustment;
               return (
                 <tr key={m.id} className="hover:bg-muted/30 transition-colors">
-                  <td className="px-4 py-3 text-sm font-medium text-foreground">{m.product?.name || '—'}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-foreground">
+                    {m.product_id ? (
+                      <Link href={`/inventory/${m.product_id}`} className="text-blue-600 hover:text-blue-800 hover:underline">
+                        {m.product?.name || '—'}
+                      </Link>
+                    ) : (
+                      <span>{m.product?.name || '—'}</span>
+                    )}
+                    {productStocks[m.product_id] && productStocks[m.product_id].length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {productStocks[m.product_id].map((s, si) => (
+                          <span key={si} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${s.qty > 0 ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`} title={`${s.warehouse_name}: ${s.qty} on hand`}>
+                        {s.warehouse_name}: {s.qty}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                  </td>
                   <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{m.product?.sku || '—'}</td>
                   <td className="px-4 py-3 text-sm text-foreground">{m.warehouse?.name || '—'}</td>
                   <td className="px-4 py-3"><span className={`badge-status ${cfg.bg} ${cfg.color}`}>{cfg.label}</span></td>

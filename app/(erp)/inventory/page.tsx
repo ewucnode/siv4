@@ -1948,8 +1948,8 @@ function BarcodeModal({ product, onClose }: { product: ProductWithStock; onClose
       try {
         JsBarcode(svgRef.current, product.sku, {
           format: 'CODE128',
-          width: 1.8,
-          height: 50,
+          width: 1.5,
+          height: 40,
           displayValue: false,
           margin: 0,
           background: '#ffffff',
@@ -1973,8 +1973,8 @@ function BarcodeModal({ product, onClose }: { product: ProductWithStock; onClose
       body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Arial, sans-serif; }
       .label { width: 2in; height: 1.1in; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 6px 8px; box-sizing: border-box; border: 1px solid #e0e0e0; border-radius: 4px; }
       .name { font-size: 9px; font-weight: 600; text-align: center; line-height: 1.2; color: #1a1a1a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-      .barcode-wrap { display: flex; justify-content: center; }
-      .barcode-wrap svg { display: block; }
+      .barcode-wrap { display: flex; justify-content: center; max-width: 100%; overflow: hidden; }
+      .barcode-wrap svg { display: block; max-width: 100%; height: auto; }
       .code { font-size: 8px; font-family: 'Courier New', monospace; color: #666; letter-spacing: 0.5px; }
       .mrp { font-size: 14px; font-weight: 700; color: #1a1a1a; }
       .mrp-label { font-size: 7px; font-weight: 600; color: #999; text-transform: uppercase; letter-spacing: 1px; }
@@ -2005,8 +2005,8 @@ function BarcodeModal({ product, onClose }: { product: ProductWithStock; onClose
           {/* Professional label preview */}
           <div className="border border-gray-200 rounded-lg p-4 bg-white w-full max-w-[240px] flex flex-col items-center gap-1.5 shadow-sm">
             <p className="text-xs font-semibold text-foreground text-center leading-tight line-clamp-2">{product.name}</p>
-            <div className="flex justify-center">
-              <svg ref={svgRef} />
+            <div className="flex justify-center w-full overflow-hidden">
+              <svg ref={svgRef} className="max-w-full h-auto" />
             </div>
             <p className="text-[10px] font-mono text-muted-foreground tracking-wide">{product.sku}</p>
             <div className="flex items-baseline gap-1.5 pt-0.5 border-t border-gray-100 w-full justify-center">

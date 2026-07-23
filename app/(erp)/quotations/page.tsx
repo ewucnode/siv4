@@ -46,21 +46,24 @@ export default function QuotationsPage() {
   const [quotationItems, setQuotationItems] = useState<any[]>([]);
   const [convertingQuotation, setConvertingQuotation] = useState<QuotationWithCustomer | null>(null);
   const [companySettings, setCompanySettings] = useState<any>({});
+  const [warehouses, setWarehouses] = useState<{ id: string; name: string; code: string }[]>([]);
 
   useEffect(() => { loadData(); }, []);
 
   async function loadData() {
     setLoading(true);
-    const [quoteRes, custRes, prodRes, settingsRes] = await Promise.all([
+    const [quoteRes, custRes, prodRes, settingsRes, whRes] = await Promise.all([
       supabase.from('quotations').select('*, customer:customers(name, code, phone, email, address)').order('created_at', { ascending: false }),
       supabase.from('customers').select('*').eq('is_active', true).order('name'),
-      supabase.from('products').select(`*, units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order), inventory_items(quantity_on_hand)`).eq('is_active', true).order('name'),
+      supabase.from('products').select(`*, units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order), inventory_items(id, warehouse_id, quantity_on_hand)`).eq('is_active', true).order('name'),
       supabase.from('app_settings').select('setting_value').eq('setting_key', 'company').maybeSingle(),
+      supabase.from('warehouses').select('id, name, code').eq('is_active', true).order('is_default', { ascending: false }).order('name'),
     ]);
     setQuotations(quoteRes.data || []);
     setCustomers(custRes.data || []);
     setProducts(prodRes.data || []);
     setCompanySettings(settingsRes.data?.setting_value || {});
+    setWarehouses(whRes.data || []);
     setLoading(false);
   }
 
@@ -305,6 +308,7 @@ export default function QuotationsPage() {
         <CreateQuotationModal
           customers={customers}
           products={products}
+          warehouses={warehouses}
           onClose={() => setShowCreateModal(false)}
           onSaved={() => { loadData(); }}
         />
@@ -426,9 +430,10 @@ function AddCustomerModal({ onClose, onSaved }: { onClose: () => void; onSaved: 
   );
 }
 
-function CreateQuotationModal({ customers: initialCustomers, products, onClose, onSaved }: {
+function CreateQuotationModal({ customers: initialCustomers, products, warehouses, onClose, onSaved }: {
   customers: Customer[];
   products: Product[];
+  warehouses: { id: string; name: string; code: string }[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -456,6 +461,8 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
     available_units?: ProductUnit[];
     base_quantity: number;
     cost_price: number;
+    warehouse_id?: string;
+    available_warehouses?: { warehouse_id: string; warehouse_name: string; stock: number; inventory_item_id: string }[];
   }[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -468,14 +475,28 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
     const unitPrice = defaultUnit ? defaultUnit.price : (product.sale_price || 0);
     const costPrice = defaultUnit ? (defaultUnit.cost_price || product.cost_price || 0) : (product.cost_price || 0);
     const baseQty = defaultUnit ? convertToBaseUnit(1, defaultUnit) : 1;
-    const stock = product.inventory_items?.reduce((s: number, i: any) => s + Number(i.quantity_on_hand), 0) ?? null;
+
+    // Build available warehouses from inventory_items
+    const invItems: any[] = product.inventory_items || [];
+    const availableWhs = invItems
+      .filter((i: any) => Number(i.quantity_on_hand) > 0)
+      .map((i: any) => ({
+        warehouse_id: i.warehouse_id,
+        warehouse_name: warehouses.find(w => w.id === i.warehouse_id)?.name || i.warehouse_id,
+        stock: Number(i.quantity_on_hand),
+        inventory_item_id: i.id,
+      }));
+    const bestWh = availableWhs.length > 0
+      ? availableWhs.reduce((a, b) => a.stock > b.stock ? a : b)
+      : null;
+    const stock = bestWh ? bestWh.stock : (invItems.length > 0 ? 0 : null);
 
     // Show warning for out of stock items (quotations can still proceed, just warn)
     if (stock !== null && stock <= 0) {
       toast({ title: 'Warning', description: `${product.name} is currently out of stock`, variant: 'destructive' });
     }
 
-    const existingIndex = items.findIndex(i => i.product_id === product.id && (i.selected_unit?.id ?? '') === (defaultUnit?.id ?? ''));
+    const existingIndex = items.findIndex(i => i.product_id === product.id && (i.selected_unit?.id ?? '') === (defaultUnit?.id ?? '') && (i.warehouse_id ?? '') === (bestWh?.warehouse_id ?? ''));
     if (existingIndex >= 0) {
       const updated = [...items];
       const ex = updated[existingIndex];
@@ -500,12 +521,19 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
       available_units: multiUnit ? product.units.filter((u: any) => u.is_active) : undefined,
       base_quantity: baseQty,
       cost_price: costPrice,
+      warehouse_id: bestWh?.warehouse_id,
+      available_warehouses: availableWhs,
     }, ...prev]);
   }
 
   function updateItem(index: number, field: string, value: any) {
     const updated = [...items];
-    if (field === 'selected_unit') {
+    if (field === 'warehouse_id') {
+      const wh = updated[index].available_warehouses?.find(w => w.warehouse_id === value);
+      if (wh) {
+        updated[index] = { ...updated[index], warehouse_id: wh.warehouse_id, stock_qty: wh.stock };
+      }
+    } else if (field === 'selected_unit') {
       const unit = value as ProductUnit;
       updated[index] = {
         ...updated[index],
@@ -583,6 +611,7 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
         unit_name: item.selected_unit?.unit_name || (item as any).product_unit || null,
         unit_conversion_factor: item.selected_unit?.conversion_factor,
         base_quantity: item.base_quantity,
+        warehouse_id: item.warehouse_id || null,
       };
     });
 
@@ -724,6 +753,22 @@ function CreateQuotationModal({ customers: initialCustomers, products, onClose, 
                                   ))}
                                 </select>
                                 <p className="text-[10px] text-muted-foreground mt-0.5">1 {item.selected_unit.unit_name} = {item.selected_unit.conversion_factor} {item.product_base_unit || 'base'}</p>
+                              </div>
+                            )}
+                            {item.available_warehouses && item.available_warehouses.length > 0 && (
+                              <div className="mt-1">
+                                <select
+                                  value={item.warehouse_id || ''}
+                                  onChange={e => updateItem(index, 'warehouse_id', e.target.value)}
+                                  className="w-full border border-emerald-200 bg-emerald-50 text-emerald-700 rounded px-2 py-1 text-xs focus:outline-none"
+                                >
+                                  {item.available_warehouses?.map(w => {
+                                    const whName = warehouses.find(wh => wh.id === w.warehouse_id)?.name || w.warehouse_name;
+                                    return (
+                                      <option key={w.warehouse_id} value={w.warehouse_id}>{whName} ({w.stock} {item.product_base_unit || 'pcs'})</option>
+                                    );
+                                  })}
+                                </select>
                               </div>
                             )}
                           </td>
