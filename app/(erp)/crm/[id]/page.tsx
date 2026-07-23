@@ -144,7 +144,7 @@ export default function CustomerDetailPage() {
     const invData = invRes.data || [];
     const returnsData = returnsRes.data || [];
     const totalPaid = invData.reduce((s, i) => s + Number(i.amount_paid), 0);
-    const totalOut = invData.reduce((s, i) => s + Number(i.balance_due || i.total_amount - i.amount_paid), 0);
+    const totalOut = invData.reduce((s, i) => s + Number(i.balance_due ?? i.total_amount - i.amount_paid), 0);
     const manualReceivablesOutstanding = receivablesWithPayments.reduce((s, r) => s + r.outstanding_balance, 0);
     const totalRefunds = returnsData.reduce((s, r) => s + Number(r.total_refund_amount), 0);
     const actualTotalPurchases = (invTotalsRes.data || []).reduce((s, i) => s + Number(i.total_amount), 0);
@@ -430,7 +430,7 @@ export default function CustomerDetailPage() {
                             <td className="px-3 py-2 text-sm text-muted-foreground">{formatDate(inv.invoice_date)}</td>
                             <td className="px-3 py-2 text-sm text-right font-semibold">{formatCurrency(inv.total_amount)}</td>
                             <td className="px-3 py-2 text-sm text-right text-green-600">{formatCurrency(inv.amount_paid)}</td>
-                            <td className="px-3 py-2 text-sm text-right text-red-600 font-bold">{formatCurrency(inv.balance_due || inv.total_amount - inv.amount_paid)}</td>
+                            <td className="px-3 py-2 text-sm text-right text-red-600 font-bold">{formatCurrency(inv.balance_due ?? inv.total_amount - inv.amount_paid)}</td>
                             <td className="px-3 py-2">
                               <span className={`badge-status ${inv.status === 'paid' ? 'bg-green-100 text-green-700' : inv.status === 'overdue' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
                                 {inv.status.replace('_', ' ')}

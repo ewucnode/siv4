@@ -691,7 +691,7 @@ export default function SalesPage() {
                     <td className="px-4 py-3 text-sm text-muted-foreground">{inv.due_date ? formatDate(inv.due_date) : '-'}</td>
                     <td className="px-4 py-3 text-right text-sm font-semibold text-foreground">{formatCurrency(inv.total_amount)}</td>
                     <td className="px-4 py-3 text-right text-sm text-green-600 font-semibold">{formatCurrency(inv.amount_paid)}</td>
-                    <td className="px-4 py-3 text-right text-sm font-bold text-red-600">{formatCurrency(inv.balance_due || (inv.total_amount - inv.amount_paid))}</td>
+                    <td className="px-4 py-3 text-right text-sm font-bold text-red-600">{formatCurrency(inv.balance_due ?? (inv.total_amount - inv.amount_paid))}</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1 items-center">
                         <span className={`badge-status ${cfg.bg} ${cfg.color} whitespace-nowrap`}>{cfg.label}</span>
@@ -745,7 +745,7 @@ export default function SalesPage() {
                             <Send className="w-3.5 h-3.5" />
                           </button>
                         )}
-                        {(inv.status === 'sent' || inv.status === 'partially_paid') && (inv.balance_due || inv.total_amount - inv.amount_paid) > 0 && (
+                        {(inv.status === 'sent' || inv.status === 'partially_paid') && (inv.balance_due ?? inv.total_amount - inv.amount_paid) > 0 && (
                           <button onClick={() => openPaymentModal(inv)} className="w-7 h-7 sm:w-8 sm:h-8 flex items-center justify-center rounded-lg hover:bg-green-50 text-muted-foreground hover:text-green-600 transition" title="Record Payment">
                             <DollarSign className="w-3.5 h-3.5" />
                           </button>
@@ -1564,7 +1564,7 @@ function CreateInvoiceModal({ customers, products, warehouses, onClose, onSaved 
 }
 
 function RecordPaymentModal({ invoice, onClose, onSaved }: { invoice: InvoiceWithCustomer; onClose: () => void; onSaved: () => void }) {
-  const balance = invoice.balance_due || (invoice.total_amount - invoice.amount_paid);
+  const balance = invoice.balance_due ?? (invoice.total_amount - invoice.amount_paid);
   const [form, setForm] = useState({
     amount: balance,
     bad_debt_amount: 0,
