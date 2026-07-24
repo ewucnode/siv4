@@ -361,7 +361,7 @@ export default function CustomerDetailPage() {
                 <p className="text-xs text-amber-700">Active Deliveries</p>
               </div>
               <div className="bg-slate-50 rounded-lg p-3 text-center">
-                <p className="text-lg font-bold text-slate-600">{formatCurrency(stats.totalOutstanding)}</p>
+                <p className="text-lg font-bold text-slate-600">{formatCurrency(stats.totalOutstanding + stats.manualReceivablesOutstanding)}</p>
                 <p className="text-xs text-slate-600">Outstanding</p>
               </div>
               {stats.storeCreditBalance > 0 && (

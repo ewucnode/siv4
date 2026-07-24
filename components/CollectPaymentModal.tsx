@@ -223,8 +223,8 @@ export default function CollectPaymentModal({
         });
         if (payError) throw payError;
 
-        // Journal entry: Dr. Cash/Bank / Cr. AR
-        const { data: arAccount } = await supabase.from('accounts').select('id').eq('code', '1100').maybeSingle();
+        // Journal entry: Dr. Cash/Bank / Cr. Manual Receivable (1300)
+        const { data: manualReceivableAccount } = await supabase.from('accounts').select('id').eq('code', '1300').maybeSingle();
         const { data: jeNum } = await supabase.rpc('get_next_journal_number');
         const { data: jeRow, error: jeError } = await supabase.from('journal_entries').insert({
           entry_number: jeNum || `JE-${Date.now().toString().slice(-6)}`,
@@ -238,13 +238,13 @@ export default function CollectPaymentModal({
         }).select().single();
         if (jeError) throw jeError;
 
-        if (arAccount) {
+        if (manualReceivableAccount) {
           await supabase.from('journal_lines').insert([
             { journal_entry_id: jeRow.id, account_id: form.account_id, description: `Payment from ${customerName}`, debit: payForThis, credit: 0, sort_order: 0 },
-            { journal_entry_id: jeRow.id, account_id: arAccount.id, description: `AR reduction - ${customerName}`, debit: 0, credit: payForThis, sort_order: 1 },
+            { journal_entry_id: jeRow.id, account_id: manualReceivableAccount.id, description: `Manual Receivable reduction - ${customerName}`, debit: 0, credit: payForThis, sort_order: 1 },
           ]);
           await supabase.rpc('increment_account_balance', { p_account_id: form.account_id, p_delta: payForThis });
-          await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: -payForThis });
+          await supabase.rpc('increment_account_balance', { p_account_id: manualReceivableAccount.id, p_delta: -payForThis });
         }
       }
 
@@ -269,7 +269,7 @@ export default function CollectPaymentModal({
 
   async function postBadDebtJournal(amount: number, date: string, description: string, custId: string) {
     const { data: badDebtAccount } = await supabase.from('accounts').select('id').eq('code', '5600').maybeSingle();
-    const { data: arAccount } = await supabase.from('accounts').select('id').eq('code', '1100').maybeSingle();
+    const { data: manualReceivableAccount } = await supabase.from('accounts').select('id').eq('code', '1300').maybeSingle();
     const { data: jeNum } = await supabase.rpc('get_next_journal_number');
 
     const { data: jeRow, error: jeError } = await supabase.from('journal_entries').insert({
@@ -288,13 +288,13 @@ export default function CollectPaymentModal({
     if (badDebtAccount) {
       lines.push({ journal_entry_id: jeRow.id, account_id: badDebtAccount.id, description, debit: amount, credit: 0, sort_order: 0 });
     }
-    if (arAccount) {
-      lines.push({ journal_entry_id: jeRow.id, account_id: arAccount.id, description, debit: 0, credit: amount, sort_order: 1 });
+    if (manualReceivableAccount) {
+      lines.push({ journal_entry_id: jeRow.id, account_id: manualReceivableAccount.id, description, debit: 0, credit: amount, sort_order: 1 });
     }
     if (lines.length > 0) {
       await supabase.from('journal_lines').insert(lines);
       if (badDebtAccount) await supabase.rpc('increment_account_balance', { p_account_id: badDebtAccount.id, p_delta: amount });
-      if (arAccount) await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: -amount });
+      if (manualReceivableAccount) await supabase.rpc('increment_account_balance', { p_account_id: manualReceivableAccount.id, p_delta: -amount });
     }
   }
 
