@@ -738,16 +738,23 @@ function QuickExpenseModal({ accounts, onSaved, onClose }: { accounts: Account[]
 
 function RecordReceivableModal({ accounts, onSaved, onClose }: { accounts: Account[]; onSaved: () => void; onClose: () => void }) {
   const [customers, setCustomers] = useState<any[]>([]);
-  const [form, setForm] = useState({ customer_id: '', amount: '', description: '', date: new Date().toISOString().split('T')[0] });
+  const [form, setForm] = useState({ customer_id: '', amount: '', description: '', date: new Date().toISOString().split('T')[0], offset_account_id: '' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  const arAccount = accounts.find(a => a.code === '1100');
+  const manualReceivableAccount = accounts.find(a => a.code === '1300');
+
+  // Offset accounts: revenue, equity, liability accounts (where the credit goes)
+  const offsetAccounts = accounts.filter(a =>
+    ['revenue', 'equity', 'liability'].includes(a.account_type)
+  );
 
   useEffect(() => {
     supabase.from('customers').select('id, name, code, outstanding_balance, total_purchases').eq('is_active', true).order('name')
       .then(({ data }) => setCustomers(data || []));
   }, []);
+
+  const selectedOffset = accounts.find(a => a.id === form.offset_account_id);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -756,10 +763,15 @@ function RecordReceivableModal({ accounts, onSaved, onClose }: { accounts: Accou
       setError('Please select a customer and enter an amount');
       return;
     }
+    if (!form.offset_account_id) {
+      setError('Please select an offset account');
+      return;
+    }
     setSaving(true);
     try {
       const amount = parseFloat(form.amount);
       const customer = customers.find(c => c.id === form.customer_id);
+      const offsetAcc = accounts.find(a => a.id === form.offset_account_id);
       const desc = form.description || `Receivable from ${customer?.name || 'Customer'}`;
       const { data: jeNum } = await supabase.rpc('get_next_journal_number');
 
@@ -775,17 +787,16 @@ function RecordReceivableModal({ accounts, onSaved, onClose }: { accounts: Accou
       }).select().single();
       if (entryError) throw entryError;
 
-      const revenueAccount = accounts.find(a => a.code === '4100');
-      if (!arAccount || !revenueAccount) throw new Error('Required accounts (1100, 4100) not found');
+      if (!manualReceivableAccount || !offsetAcc) throw new Error('Required accounts not found');
 
       await supabase.from('journal_lines').insert([
-        { journal_entry_id: entry.id, account_id: arAccount.id, description: desc, debit: amount, credit: 0, sort_order: 0 },
-        { journal_entry_id: entry.id, account_id: revenueAccount.id, description: desc, debit: 0, credit: amount, sort_order: 1 },
+        { journal_entry_id: entry.id, account_id: manualReceivableAccount.id, description: desc, debit: amount, credit: 0, sort_order: 0 },
+        { journal_entry_id: entry.id, account_id: offsetAcc.id, description: desc, debit: 0, credit: amount, sort_order: 1 },
       ]);
 
       // Atomic balance updates
-      await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: amount });
-      await supabase.rpc('increment_account_balance', { p_account_id: revenueAccount.id, p_delta: amount });
+      await supabase.rpc('increment_account_balance', { p_account_id: manualReceivableAccount.id, p_delta: amount });
+      await supabase.rpc('increment_account_balance', { p_account_id: offsetAcc.id, p_delta: amount });
 
       if (customer) {
         await supabase.from('customers').update({
@@ -795,7 +806,7 @@ function RecordReceivableModal({ accounts, onSaved, onClose }: { accounts: Accou
       }
 
       toast({ title: 'Success', description: `Receivable of ${formatCurrency(amount)} recorded` });
-      setForm({ customer_id: '', amount: '', description: '', date: new Date().toISOString().split('T')[0] });
+      setForm({ customer_id: '', amount: '', description: '', date: new Date().toISOString().split('T')[0], offset_account_id: '' });
       onSaved();
       onClose();
     } catch (err: any) {
@@ -831,12 +842,20 @@ function RecordReceivableModal({ accounts, onSaved, onClose }: { accounts: Accou
               <input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
             </div>
           </div>
+          <div>
+            <label className="block text-xs font-medium mb-1">Offset Account (Credit) *</label>
+            <select required value={form.offset_account_id} onChange={e => setForm({ ...form, offset_account_id: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm">
+              <option value="">Select offset account</option>
+              {offsetAccounts.map(a => <option key={a.id} value={a.id}>{a.code} - {a.name}</option>)}
+            </select>
+            <p className="text-[11px] text-muted-foreground mt-1">Choose where the credit goes: Sales Revenue for credit sales, Service Revenue for services, Opening Balance Equity for opening balances, Other Income for miscellaneous.</p>
+          </div>
           <div className="bg-muted/30 rounded-lg p-3 text-xs text-muted-foreground">
-            Dr. Accounts Receivable ({arAccount?.code}) &rarr; Cr. Service Revenue (4100)
+            Dr. Manual Receivable ({manualReceivableAccount?.code || '1300'}) &rarr; Cr. {selectedOffset ? `${selectedOffset.code} - ${selectedOffset.name}` : 'Select offset account'}
           </div>
           <div>
             <label className="block text-xs font-medium mb-1">Description</label>
-            <input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="e.g. Credit sale, Service billed..." className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
+            <input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="e.g. Credit sale, Service billed, Opening balance..." className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
           </div>
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
@@ -967,7 +986,7 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  const arAccount = accounts.find(a => a.code === '1100');
+  const manualReceivableAccount = accounts.find(a => a.code === '1300');
   const badDebtAccount = accounts.find(a => a.code === '5600');
   const cashBankAccounts = accounts.filter(a => a.is_cash || a.is_bank);
   const remainingAfter = receivable.outstanding_balance - form.amount - form.bad_debt_amount;
@@ -1001,9 +1020,9 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
       });
       if (payError) throw payError;
 
-      if (!arAccount) throw new Error('Accounts Receivable account not found');
+      if (!manualReceivableAccount) throw new Error('Manual Receivable account (1300) not found');
 
-      // Payment journal entry: Dr. Cash/Bank / Cr. AR
+      // Payment journal entry: Dr. Cash/Bank / Cr. Manual Receivable (1300)
       if (amount > 0) {
         const { data: entry, error: entryError } = await supabase.from('journal_entries').insert({
           entry_number: jeNum || `JE-${Date.now().toString().slice(-6)}`,
@@ -1018,14 +1037,14 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
 
         await supabase.from('journal_lines').insert([
           { journal_entry_id: entry.id, account_id: form.account_id, description: desc, debit: amount, credit: 0, sort_order: 0 },
-          { journal_entry_id: entry.id, account_id: arAccount.id, description: desc, debit: 0, credit: amount, sort_order: 1 },
+          { journal_entry_id: entry.id, account_id: manualReceivableAccount.id, description: desc, debit: 0, credit: amount, sort_order: 1 },
         ]);
 
         await supabase.rpc('increment_account_balance', { p_account_id: form.account_id, p_delta: amount });
-        await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: -amount });
+        await supabase.rpc('increment_account_balance', { p_account_id: manualReceivableAccount.id, p_delta: -amount });
       }
 
-      // Bad debt journal entry: Dr. Bad Debt Expense (5600) / Cr. AR (1100)
+      // Bad debt journal entry: Dr. Bad Debt Expense (5600) / Cr. Manual Receivable (1300)
       if (badDebt > 0) {
         const { data: jeNum2 } = await supabase.rpc('get_next_journal_number');
         const { data: bdEntry, error: bdEntryError } = await supabase.from('journal_entries').insert({
@@ -1042,16 +1061,15 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
         if (badDebtAccount) {
           await supabase.from('journal_lines').insert([
             { journal_entry_id: bdEntry.id, account_id: badDebtAccount.id, description: `Bad debt write-off - ${receivable.party_name || ''}`, debit: badDebt, credit: 0, sort_order: 0 },
-            { journal_entry_id: bdEntry.id, account_id: arAccount.id, description: `AR reduction - bad debt`, debit: 0, credit: badDebt, sort_order: 1 },
+            { journal_entry_id: bdEntry.id, account_id: manualReceivableAccount.id, description: `Manual Receivable reduction - bad debt`, debit: 0, credit: badDebt, sort_order: 1 },
           ]);
           await supabase.rpc('increment_account_balance', { p_account_id: badDebtAccount.id, p_delta: badDebt });
         } else {
-          // Still need to credit AR even if bad debt expense account is missing
           await supabase.from('journal_lines').insert([
-            { journal_entry_id: bdEntry.id, account_id: arAccount.id, description: `AR reduction - bad debt`, debit: 0, credit: badDebt, sort_order: 0 },
+            { journal_entry_id: bdEntry.id, account_id: manualReceivableAccount.id, description: `Manual Receivable reduction - bad debt`, debit: 0, credit: badDebt, sort_order: 0 },
           ]);
         }
-        await supabase.rpc('increment_account_balance', { p_account_id: arAccount.id, p_delta: -badDebt });
+        await supabase.rpc('increment_account_balance', { p_account_id: manualReceivableAccount.id, p_delta: -badDebt });
       }
 
       // Update customer outstanding balance (reduce by payment + bad debt)
@@ -1136,7 +1154,7 @@ function RecordReceivablePaymentModal({ receivable, accounts, onClose, onSaved }
             <label className="block text-xs font-medium mb-1">Reference / Notes</label>
             <input value={form.reference_number} onChange={e => setForm({ ...form, reference_number: e.target.value })} placeholder="Cheque no., Transaction ID..." className="w-full border border-border rounded-lg px-3 py-2 text-sm" />
           </div>
-          <div className="bg-muted/30 rounded-lg p-3 text-xs text-muted-foreground">Dr. Cash/Bank &rarr; Cr. Accounts Receivable (1100){form.bad_debt_amount > 0 && ' + Dr. Bad Debt (5600) → Cr. AR'}</div>
+          <div className="bg-muted/30 rounded-lg p-3 text-xs text-muted-foreground">Dr. Cash/Bank &rarr; Cr. Manual Receivable (1300){form.bad_debt_amount > 0 && ' + Dr. Bad Debt (5600) → Cr. Manual Receivable'}</div>
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
             <button type="submit" disabled={saving} className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-60">{saving ? 'Saving...' : 'Record Payment'}</button>
