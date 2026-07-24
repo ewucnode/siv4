@@ -142,7 +142,11 @@ function AccountModal({ account, onClose, onSaved }: { account?: Account | null;
     setSaving(true);
     setError('');
 
-    const data = {
+    const newBalance = Number(form.balance) || 0;
+    const oldBalance = Number(account?.balance) || 0;
+    const balanceDelta = newBalance - oldBalance;
+
+    const accountData = {
       code: form.code,
       name: form.name,
       account_type: form.account_type as 'asset' | 'liability' | 'equity' | 'revenue' | 'expense',
@@ -150,15 +154,64 @@ function AccountModal({ account, onClose, onSaved }: { account?: Account | null;
       is_bank: form.is_bank,
       bank_name: form.is_bank ? form.bank_name || null : null,
       account_number: form.is_bank ? form.account_number || null : null,
-      balance: Number(form.balance) || 0,
       is_active: form.is_active,
     };
 
-    const { error } = isEdit
-      ? await supabase.from('accounts').update(data).eq('id', account!.id)
-      : await supabase.from('accounts').insert(data);
+    let savedAccountId = account?.id;
 
-    if (error) { setError(error.message); setSaving(false); return; }
+    if (isEdit) {
+      // Don't set balance directly here — the journal entry will handle balance changes
+      const updateData = { ...accountData, balance: oldBalance };
+      const { error } = await supabase.from('accounts').update(updateData).eq('id', account!.id);
+      if (error) { setError(error.message); setSaving(false); return; }
+    } else {
+      // New account: insert with balance 0, the journal entry will set the opening balance
+      const insertData = { ...accountData, balance: 0 };
+      const { data: inserted, error } = await supabase.from('accounts').insert(insertData).select().single();
+      if (error) { setError(error.message); setSaving(false); return; }
+      savedAccountId = inserted.id;
+    }
+
+    // Auto-post opening journal entry when balance changes
+    if (savedAccountId && Math.abs(balanceDelta) > 0.001) {
+      const { data: equityAccount } = await supabase.from('accounts').select('id').eq('code', '3900').maybeSingle();
+
+      if (equityAccount) {
+        const accountType = form.account_type;
+        const isDebitNormal = accountType === 'asset' || accountType === 'expense';
+        const accountDebit = isDebitNormal ? Math.abs(balanceDelta) : 0;
+        const accountCredit = !isDebitNormal ? Math.abs(balanceDelta) : 0;
+        const equityDebit = balanceDelta < 0 ? Math.abs(balanceDelta) : 0;
+        const equityCredit = balanceDelta > 0 ? Math.abs(balanceDelta) : 0;
+
+        const { data: jeNum } = await supabase.rpc('get_next_journal_number');
+        const { data: jeRow, error: jeError } = await supabase.from('journal_entries').insert({
+          entry_number: jeNum,
+          entry_date: new Date().toISOString().split('T')[0],
+          description: `Opening Balance - ${form.name} (${form.code})`,
+          reference_type: 'opening_balance',
+          total_debit: accountDebit + equityDebit,
+          total_credit: accountCredit + equityCredit,
+          is_posted: true,
+        }).select().single();
+
+        if (jeError) {
+          console.error('Opening JE error:', jeError.message);
+        } else if (jeRow) {
+          await supabase.from('journal_lines').insert([
+            { journal_entry_id: jeRow.id, account_id: savedAccountId, description: `Opening balance adjustment - ${form.name}`, debit: accountDebit, credit: accountCredit, sort_order: 0 },
+            { journal_entry_id: jeRow.id, account_id: equityAccount.id, description: `Opening balance equity - ${form.name}`, debit: equityDebit, credit: equityCredit, sort_order: 1 },
+          ]);
+
+          // Update account balances via the RPC
+          await supabase.rpc('increment_account_balance', { p_account_id: savedAccountId, p_delta: balanceDelta });
+          await supabase.rpc('increment_account_balance', { p_account_id: equityAccount.id, p_delta: -balanceDelta });
+        }
+      } else {
+        // No equity account — fall back to direct balance update
+        await supabase.from('accounts').update({ balance: newBalance }).eq('id', savedAccountId);
+      }
+    }
 
     toast({ title: 'Success', description: isEdit ? 'Account updated successfully' : 'Account created successfully' });
     onSaved();
