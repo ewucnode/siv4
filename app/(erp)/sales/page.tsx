@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
+import { fetchAll } from '@/lib/fetch-all';
 import { formatCurrency, formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
 import { ShoppingCart, Plus, Search, Eye, EyeOff, X, Trash2, TrendingUp, TrendingDown, Clock, CircleCheck as CheckCircle2, Printer, DollarSign, Send, CreditCard, UserPlus, RotateCcw, Package, Filter, ChevronDown, ChevronRight, Wallet, CircleArrowDown as ArrowDownCircle, CircleArrowUp as ArrowUpCircle, Truck, Calendar, ExternalLink, Pencil, History, Ban, TriangleAlert as AlertTriangle, Banknote, Info, Copy, ClipboardPaste, FileText, Calculator } from 'lucide-react';
@@ -58,23 +59,6 @@ interface InvoiceItem {
   subtotal: number;
   selected_unit?: ProductUnit;
   base_quantity: number;
-}
-
-// Fetch every row of a query, paginating past Supabase's 1000-row default
-// cap. Takes a builder factory so each page runs a fresh query (builders
-// mutate in place, so they can't be reused across pages).
-async function fetchAll<T = any>(build: () => any, pageSize = 1000): Promise<T[]> {
-  const rows: T[] = [];
-  let pg = 0;
-  while (true) {
-    const { data, error } = await build().range(pg * pageSize, (pg + 1) * pageSize - 1);
-    if (error) throw error;
-    const page = (data || []) as T[];
-    rows.push(...page);
-    if (page.length < pageSize) break;
-    pg++;
-  }
-  return rows;
 }
 
 export default function SalesPage() {
@@ -668,7 +652,7 @@ export default function SalesPage() {
 
   const filtered = invoices.filter(i => {
     // Basic filters
-    if (search && !i.invoice_number.toLowerCase().includes(search.toLowerCase()) && !i.customer?.name?.toLowerCase().includes(search.toLowerCase())) return false;
+    if (search && !i.invoice_number.toLowerCase().includes(search.toLowerCase()) && !i.customer?.name?.toLowerCase().includes(search.toLowerCase()) && !(i.reference || '').toLowerCase().includes(search.toLowerCase())) return false;
     if (filterStatus === 'refundable') {
       // Invoices eligible for return (paid or partially paid, with remaining balance)
       if (i.status !== 'paid' && i.status !== 'partially_paid') return false;
@@ -3142,7 +3126,7 @@ function OutstandingBreakdownModal({ onClose }: { onClose: () => void }) {
   }, []);
 
   const filtered = invoices.filter(inv => {
-    const matchSearch = !search || inv.invoice_number.toLowerCase().includes(search.toLowerCase()) || (inv.customer?.name || '').toLowerCase().includes(search.toLowerCase());
+    const matchSearch = !search || inv.invoice_number.toLowerCase().includes(search.toLowerCase()) || (inv.customer?.name || '').toLowerCase().includes(search.toLowerCase()) || (inv.reference || '').toLowerCase().includes(search.toLowerCase());
     const matchStatus = !filterStatus || inv.status === filterStatus;
     return matchSearch && matchStatus;
   });
@@ -3197,7 +3181,7 @@ function OutstandingBreakdownModal({ onClose }: { onClose: () => void }) {
               <input
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                placeholder="Search by invoice # or customer..."
+                  placeholder="Search by invoice #, customer, or reference..."
                 className="w-full pl-8 pr-4 py-2 text-sm border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
             </div>
