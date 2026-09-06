@@ -64,7 +64,7 @@ export default function ReportsPage() {
       invoicesRes, purchasesRes, customersRes, productsRes,
       topProductsRes, topCustomersRes, paymentsRes, accountsRes, invResult
     ] = await Promise.all([
-      applyDateRange(supabase.from('invoices').select('total_amount, subtotal, invoice_date, status').neq('status', 'cancelled'), 'invoice_date'),
+      applyDateRange(supabase.from('invoices').select('total_amount, tax_amount, subtotal, invoice_date, status').neq('status', 'cancelled').neq('status', 'draft'), 'invoice_date'),
       applyDateRange(supabase.from('purchase_orders').select('total_amount'), 'order_date'),
       supabase.from('customers').select('total_purchases'),
       supabase.from('products').select('id, unit'),
@@ -75,7 +75,9 @@ export default function ReportsPage() {
       getInventoryValue(supabase),
     ]);
 
-    const totalRevenue = (invoicesRes.data || []).reduce((s: number, i: any) => s + Number(i.total_amount), 0);
+    // Revenue net of VAT: the GL posts sales net of tax (Cr 4000 = total - VAT),
+    // so the P&L figure here must match that basis.
+    const totalRevenue = (invoicesRes.data || []).reduce((s: number, i: any) => s + Number(i.total_amount) - Number(i.tax_amount || 0), 0);
     const totalPurchases = (purchasesRes.data || []).reduce((s: number, p: any) => s + Number(p.total_amount), 0);
 
     // COGS from Chart of Accounts — use RPC for reliable DB-side date filtering
@@ -117,10 +119,11 @@ export default function ReportsPage() {
         p_start_date: effectiveStart,
         p_end_date: effectiveEnd,
       });
-      totalOperatingExpenses += Math.max(0, Number(data || 0));
+      // no clamp: credit balances on expense accounts are contras that net the section
+      totalOperatingExpenses += Number(data || 0);
     }
 
-    const grossProfit = totalRevenue - Math.max(0, salesReturnsTotal) - Math.max(0, cogsActual);
+    const grossProfit = totalRevenue - salesReturnsTotal - cogsActual;
     const netProfit = grossProfit - Math.max(0, totalOperatingExpenses);
     const inventoryValue = invResult.total;
 
@@ -207,16 +210,16 @@ export default function ReportsPage() {
       // ledger is also what every other COGS figure on this page reports, so the
       // chart no longer contradicts the stat cards above it.
       const [invRes, poRes, cogsRes] = await Promise.all([
-        supabase.from('invoices').select('total_amount').gte('invoice_date', startDate).lte('invoice_date', endDate).neq('status', 'cancelled'),
+        supabase.from('invoices').select('total_amount, tax_amount').gte('invoice_date', startDate).lte('invoice_date', endDate).neq('status', 'cancelled'),
         supabase.from('purchase_orders').select('total_amount').gte('order_date', startDate).lte('order_date', endDate),
         cogsAccountId
           ? supabase.rpc('period_net_debit', { p_account_id: cogsAccountId, p_start_date: startDate, p_end_date: endDate })
           : Promise.resolve({ data: 0 }),
       ]);
 
-      const sales = (invRes.data || []).reduce((s: number, inv: any) => s + Number(inv.total_amount), 0);
+      const sales = (invRes.data || []).reduce((s: number, inv: any) => s + Number(inv.total_amount) - Number(inv.tax_amount || 0), 0);
       const purchases = (poRes.data || []).reduce((s: number, po: any) => s + Number(po.total_amount), 0);
-      const cogs = Math.max(0, Number(cogsRes.data || 0));
+      const cogs = Number(cogsRes.data || 0);
 
       result.push({ month: months[i], sales, purchases, profit: sales - cogs });
     }
@@ -349,8 +352,8 @@ export default function ReportsPage() {
             <p className="text-xs text-muted-foreground">Cost of Goods Sold</p>
             <Package className="w-4 h-4 text-amber-500" />
           </div>
-          <p className="text-2xl font-bold text-red-600">{formatCurrency(Math.max(0, stats.cogsActual))}</p>
-          <p className="text-xs text-muted-foreground mt-1">{stats.totalRevenue > 0 ? ((Math.max(0, stats.cogsActual) / stats.totalRevenue) * 100).toFixed(1) : 0}% of revenue</p>
+          <p className="text-2xl font-bold text-red-600">{formatCurrency(stats.cogsActual)}</p>
+          <p className="text-xs text-muted-foreground mt-1">{stats.totalRevenue > 0 ? ((stats.cogsActual / stats.totalRevenue) * 100).toFixed(1) : 0}% of revenue</p>
         </div>
         <div className="stat-card">
           <div className="flex items-center justify-between mb-1">
@@ -593,11 +596,11 @@ export default function ReportsPage() {
               </div>
               <div className="flex justify-between items-center px-6 py-2 border-b border-gray-100">
                 <span className="text-sm text-gray-700">Cost of Goods Sold</span>
-                <span className="text-sm font-medium text-red-600">({formatCurrency(Math.max(0, stats.cogsActual))})</span>
+                <span className="text-sm font-medium text-red-600">({formatCurrency(stats.cogsActual)})</span>
               </div>
               <div className="flex justify-between items-center px-6 py-2 bg-orange-50 border-b border-border">
                 <span className="text-sm font-semibold text-gray-800">Total COGS</span>
-                <span className="text-sm font-bold text-orange-800">({formatCurrency(Math.max(0, stats.cogsActual))})</span>
+                <span className="text-sm font-bold text-orange-800">({formatCurrency(stats.cogsActual)})</span>
               </div>
 
               {/* Gross Profit */}

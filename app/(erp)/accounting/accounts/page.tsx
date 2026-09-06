@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency, formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Plus, X, Pencil, Trash2, ExternalLink, Search, AlertTriangle, ToggleLeft, ToggleRight, Info } from 'lucide-react';
+import { Plus, X, Pencil, Trash2, ExternalLink, Search, AlertTriangle, ToggleLeft, ToggleRight, Info, Lock } from 'lucide-react';
 import type { Account } from '@/lib/types';
 import Link from 'next/link';
 
@@ -17,6 +17,11 @@ const typeColors: Record<string, string> = {
 };
 
 const accountTypes = ['asset', 'liability', 'equity', 'revenue', 'expense'] as const;
+
+// Accounts the posting triggers hardcode — editing their type/code or
+// deactivating them breaks every automatic entry. Frontend guard; the audit
+// trail records any manual SQL changes.
+const SYSTEM_ACCOUNT_CODES = new Set(['1001', '1100', '1200', '1300', '2000', '2100', '2110', '2200', '2300', '3900', '4000', '4001', '4050', '4200', '5000', '5600', '5900']);
 
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -212,18 +217,27 @@ export default function AccountsPage() {
                       <button
                         onClick={() => setEditingAccount(a)}
                         className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition"
-                        title="Edit account"
+                        title={SYSTEM_ACCOUNT_CODES.has(a.code) ? 'Edit account (system account — keep the type unchanged)' : 'Edit account'}
                       >
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
                       {a.is_active ? (
-                        <button
-                          onClick={() => setDeactivatingAccount(a)}
-                          className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition"
-                          title="Deactivate account"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        SYSTEM_ACCOUNT_CODES.has(a.code) ? (
+                          <span
+                            className="w-7 h-7 flex items-center justify-center text-gray-300"
+                            title="System account — the posting triggers depend on it and cannot be deactivated"
+                          >
+                            <Lock className="w-3.5 h-3.5" />
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => setDeactivatingAccount(a)}
+                            className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition"
+                            title="Deactivate account"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )
                       ) : (
                         <button
                           onClick={() => handleReactivate(a)}
@@ -306,62 +320,26 @@ function CreateAccountModal({ onClose, onSaved }: { onClose: () => void; onSaved
           .eq('code', '3900')
           .maybeSingle();
 
-        if (equityAccount) {
-          const { data: jeNum } = await supabase.rpc('get_next_journal_number');
-          const isDebitNormal = form.account_type === 'asset' || form.account_type === 'expense';
-          const debitAccountId = isDebitNormal ? newAccount.id : equityAccount.id;
-          const creditAccountId = isDebitNormal ? equityAccount.id : newAccount.id;
-
-          const { data: entry, error: entryError } = await supabase
-            .from('journal_entries')
-            .insert({
-              entry_number: jeNum || `JE-${Date.now().toString().slice(-6)}`,
-              entry_date: new Date().toISOString().split('T')[0],
-              description: `Opening Balance - ${form.name}`,
-              reference_type: 'opening_balance',
-              total_debit: openingBalance,
-              total_credit: openingBalance,
-              is_posted: true,
-            })
-            .select()
-            .single();
-
-          if (entryError) throw entryError;
-
-          await supabase.from('journal_lines').insert([
-            {
-              journal_entry_id: entry.id,
-              account_id: debitAccountId,
-              description: `Opening Balance - ${form.name}`,
-              debit: openingBalance,
-              credit: 0,
-              sort_order: 0,
-            },
-            {
-              journal_entry_id: entry.id,
-              account_id: creditAccountId,
-              description: `Opening Balance - ${form.name}`,
-              debit: 0,
-              credit: openingBalance,
-              sort_order: 1,
-            },
-          ]);
-
-          await supabase.rpc('increment_account_balance', {
-            p_account_id: newAccount.id,
-            p_delta: isDebitNormal ? openingBalance : -openingBalance,
-          });
-          await supabase.rpc('increment_account_balance', {
-            p_account_id: equityAccount.id,
-            p_delta: isDebitNormal ? -openingBalance : openingBalance,
-          });
-        } else {
-          // Fallback: direct balance update if Opening Balance Equity doesn't exist
-          await supabase
-            .from('accounts')
-            .update({ balance: openingBalance })
-            .eq('id', newAccount.id);
+        if (!equityAccount) {
+          throw new Error('Opening Balance Equity account (3900) not found — cannot post an opening balance. Create account 3900 first, or set the balance to 0 and adjust via the journal.');
         }
+
+        const isDebitNormal = form.account_type === 'asset' || form.account_type === 'expense';
+        const { error: rpcError } = await supabase.rpc('post_manual_journal_entry', {
+          p_entry_date: new Date().toISOString().split('T')[0],
+          p_description: `Opening Balance - ${form.name}`,
+          p_reference_type: 'opening_balance',
+          p_lines: isDebitNormal
+            ? [
+                { account_id: newAccount.id, debit: openingBalance, credit: 0, description: `Opening Balance - ${form.name}` },
+                { account_id: equityAccount.id, debit: 0, credit: openingBalance, description: `Opening Balance - ${form.name}` },
+              ]
+            : [
+                { account_id: equityAccount.id, debit: openingBalance, credit: 0, description: `Opening Balance - ${form.name}` },
+                { account_id: newAccount.id, debit: 0, credit: openingBalance, description: `Opening Balance - ${form.name}` },
+              ],
+        });
+        if (rpcError) throw rpcError;
       }
 
       toast({ title: 'Success', description: `Account ${form.code} created successfully` });
