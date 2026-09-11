@@ -15,6 +15,8 @@
 
 import { REPLICA_BY_TABLE, replicaRows, subscribeReplica, type ReplicaTableSpec } from './replica'
 import { getMeta } from './db'
+import { pendingOverlayFor, resetPendingCaches, applyPatchChain } from './pending'
+import { subscribeOutbox } from './outbox'
 
 export interface ReplicaQueryResult {
   data: any
@@ -458,12 +460,38 @@ async function loadRows(table: string): Promise<any[] | null> {
     return null
   }
   const rows = await replicaRows<any>(spec)
-  rowCache.set(table, { at: Date.now(), rows })
-  return rows
+  // Pending-rows overlay: queued outbox work appears immediately —
+  // provisional rows for creates, patches for edits of existing (real or
+  // pending) rows, removals for queued deletes. Replica rows win over stale
+  // pending twins on id collisions.
+  let merged = rows
+  const overlay = await pendingOverlayFor(table)
+  if (overlay.deletes.size > 0) {
+    merged = merged.filter((r: any) => !overlay.deletes.has(String(r.id)))
+  }
+  if (overlay.patches.size > 0) {
+    merged = merged.map((r: any) =>
+      overlay.patches.has(String(r.id))
+        ? applyPatchChain(r, overlay.patches.get(String(r.id))!)
+        : r,
+    )
+  }
+  if (overlay.rows.length > 0) {
+    const ids = new Set(merged.map((r: any) => String(r.id)))
+    merged = [...merged, ...overlay.rows.filter((pr: any) => !ids.has(String(pr.id)))]
+  }
+  rowCache.set(table, { at: Date.now(), rows: merged })
+  return merged
 }
 
 if (typeof window !== 'undefined') {
   subscribeReplica(() => rowCache.clear())
+  // A queued/synced/discarded item changes the overlay — drop memoized rows
+  // and the overlay's own caches.
+  subscribeOutbox(() => {
+    rowCache.clear()
+    resetPendingCaches()
+  })
 }
 
 /** Test hook: drop memoized rows and parsed embed specs between test cases. */

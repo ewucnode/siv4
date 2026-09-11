@@ -7,6 +7,8 @@ import { toast } from '@/hooks/use-toast';
 import { ArrowLeft, Search, RefreshCw, Plus, X, Package, FileText, Truck, CircleCheck as CheckCircle, Eye, Printer, ArrowRightLeft, TrendingUp } from 'lucide-react';
 import Link from 'next/link';
 import type { Supplier } from '@/lib/types';
+import { networkMonitor } from '@/lib/offline/network';
+import { enqueueOp } from '@/lib/offline/outbox';
 
 interface PurchaseOrder {
   id: string;
@@ -282,6 +284,51 @@ function ReturnModal({ purchaseOrders, onClose, onSaved }: {
 
     setSaving(true);
     setError('');
+
+    // Offline: queue the return; sync_purchase_return_create replays the
+    // whole flow atomically — movements, FIFO reversal (youngest first),
+    // counter update, PO received-quantity rollback, return header + items,
+    // with the net-cost ratio derived from the LIVE PO at replay time.
+    if (!networkMonitor.getState().online) {
+      const returnId = crypto.randomUUID();
+      const tempNumber = `PRET-OFF-${Date.now().toString().slice(-6)}`;
+      try {
+        await enqueueOp('purchase_return.create', {
+          idempotency_key: crypto.randomUUID(),
+          id: returnId,
+          return_number: tempNumber,
+          purchase_order_id: selectedPO.id,
+          supplier_id: selectedPO.supplier_id,
+          return_date: new Date().toISOString().split('T')[0],
+          total_amount: itemsToReturn.reduce((sum, [itemId, { qty }]) => {
+            const item = items.find(i => i.id === itemId);
+            return sum + qty * Number(item?.unit_cost || 0);
+          }, 0),
+          items: itemsToReturn.map(([itemId, { qty, reason }]) => {
+            const item = items.find(i => i.id === itemId);
+            return {
+              purchase_order_item_id: itemId,
+              product_id: item?.product_id || null,
+              unit_cost: Number(item?.unit_cost || 0),
+              subtotal: qty * Number(item?.unit_cost || 0),
+              quantity: qty,
+              reason: reason || 'other',
+              warehouse_id: (item as any)?.warehouse_id || null,
+            };
+          }),
+        }, `Purchase return — ${selectedPO.po_number}`);
+        toast({
+          title: 'Return queued offline',
+          description: `${tempNumber} saved on this device — stock reversal and journals post when you reconnect.`,
+        });
+        onSaved();
+        onClose();
+      } catch (err: any) {
+        setError(err?.message || 'Could not queue the return offline');
+        setSaving(false);
+      }
+      return;
+    }
 
     try {
       const returnId = crypto.randomUUID();

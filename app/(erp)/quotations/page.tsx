@@ -16,6 +16,8 @@ import ProductFilterDropdown from '@/components/ui/ProductFilterDropdown';
 import PrintTemplate from '@/components/PrintTemplate';
 import { printNode } from '@/lib/print';
 import Pagination from '@/components/ui/AppPagination';
+import { networkMonitor } from '@/lib/offline/network';
+import { enqueueOp } from '@/lib/offline/outbox';
 
 const statusConfig: Record<QuotationStatus, { label: string; color: string; bg: string }> = {
   draft: { label: 'Draft', color: 'text-gray-600', bg: 'bg-gray-100' },
@@ -82,6 +84,19 @@ export default function QuotationsPage() {
   }
 
   async function sendQuotation(quotation: QuotationWithCustomer) {
+    if (!networkMonitor.getState().online) {
+      try {
+        await enqueueOp('quotation.status', {
+          idempotency_key: crypto.randomUUID(),
+          id: quotation.id, status: 'sent',
+          expected_updated_at: quotation.updated_at || null,
+        }, `Send quotation ${quotation.quote_number}`);
+        toast({ title: 'Queued offline', description: `${quotation.quote_number} will be marked sent when you reconnect.` });
+      } catch (err: any) {
+        toast({ title: 'Error', description: err?.message || 'Could not queue', variant: 'destructive' });
+      }
+      return;
+    }
     const { error } = await supabase
       .from('quotations')
       .update({ status: 'sent' })
@@ -96,6 +111,19 @@ export default function QuotationsPage() {
 
   async function setQuotationStatus(quotation: QuotationWithCustomer, status: 'accepted' | 'rejected' | 'expired') {
     const label = status === 'accepted' ? 'accepted' : status === 'rejected' ? 'rejected' : 'expired';
+    if (!networkMonitor.getState().online) {
+      try {
+        await enqueueOp('quotation.status', {
+          idempotency_key: crypto.randomUUID(),
+          id: quotation.id, status,
+          expected_updated_at: quotation.updated_at || null,
+        }, `Quotation ${label} (${quotation.quote_number})`);
+        toast({ title: 'Queued offline', description: `${quotation.quote_number} will be marked ${label} when you reconnect.` });
+      } catch (err: any) {
+        toast({ title: 'Error', description: err?.message || 'Could not queue', variant: 'destructive' });
+      }
+      return;
+    }
     const { error } = await supabase
       .from('quotations')
       .update({ status })
@@ -123,6 +151,20 @@ export default function QuotationsPage() {
   }
 
   async function deleteQuotation(quotation: QuotationWithCustomer) {
+    if (!networkMonitor.getState().online) {
+      try {
+        await enqueueOp('quotation.delete', {
+          idempotency_key: crypto.randomUUID(),
+          id: quotation.id,
+        }, `Delete quotation ${quotation.quote_number}`);
+        toast({ title: 'Queued offline', description: `${quotation.quote_number} will be deleted when you reconnect.` });
+        setDeletingQuotation(null);
+        loadData();
+      } catch (err: any) {
+        toast({ title: 'Error', description: err?.message || 'Could not queue the deletion', variant: 'destructive' });
+      }
+      return;
+    }
     await supabase.from('quotation_items').delete().eq('quotation_id', quotation.id);
     await supabase.from('cost_price_history').delete().eq('quotation_id', quotation.id);
     const { error } = await supabase.from('quotations').delete().eq('id', quotation.id);
@@ -408,7 +450,7 @@ export default function QuotationsPage() {
   );
 }
 
-function AddCustomerModal({ onClose, onSaved }: { onClose: () => void; onSaved: (id: string) => void }) {
+function AddCustomerModal({ onClose, onSaved }: { onClose: () => void; onSaved: (id: string, provisionalRow?: any) => void }) {
   const [form, setForm] = useState({
     name: '',
     phone: '',
@@ -426,31 +468,50 @@ function AddCustomerModal({ onClose, onSaved }: { onClose: () => void; onSaved: 
     setError('');
 
     const code = `CUST-${Date.now().toString().slice(-6)}`;
-    const { data, error: insertError } = await supabase
+    const data = {
+      code,
+      name: form.name.trim(),
+      phone: form.phone || null,
+      email: form.email || null,
+      address: form.address || null,
+      type: form.type,
+      country: 'Bangladesh',
+      is_active: true,
+      credit_limit: 0,
+      credit_days: 0,
+      outstanding_balance: 0,
+      total_purchases: 0,
+      loyalty_points: 0,
+      discount_percent: 0,
+    };
+
+    // Offline: queue with a client-generated id so the quotation being
+    // built can reference this customer immediately.
+    if (!networkMonitor.getState().online) {
+      const id = crypto.randomUUID();
+      try {
+        await enqueueOp('customer.create', { id, data }, `New customer — ${form.name.trim()}`);
+      } catch (err: any) {
+        setError(err?.message || 'Offline storage error');
+        setSaving(false);
+        return;
+      }
+      toast({ title: 'Customer queued offline', description: `${form.name.trim()} will sync when you reconnect.` });
+      onSaved(id, { id, ...data });
+      onClose();
+      return;
+    }
+
+    const { data: inserted, error: insertError } = await supabase
       .from('customers')
-      .insert({
-        code,
-        name: form.name.trim(),
-        phone: form.phone || null,
-        email: form.email || null,
-        address: form.address || null,
-        type: form.type,
-        country: 'Bangladesh',
-        is_active: true,
-        credit_limit: 0,
-        credit_days: 0,
-        outstanding_balance: 0,
-        total_purchases: 0,
-        loyalty_points: 0,
-        discount_percent: 0,
-      })
+      .insert(data)
       .select('id')
       .single();
 
     if (insertError) { setError(insertError.message); setSaving(false); return; }
 
     toast({ title: 'Success', description: 'Customer added successfully' });
-    onSaved(data.id);
+    onSaved(inserted.id, { id: inserted.id, ...data });
     onClose();
   }
 
@@ -693,6 +754,73 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
     e.preventDefault();
     if (!form.customer_id) { setError('Please select a customer'); return; }
     if (items.length === 0) { setError('Please add at least one item'); return; }
+
+    // Offline: queue the quotation; sync_quotation_create replays it
+    // atomically (header + items + cost snapshot, QT- numbering server-side).
+    if (!networkMonitor.getState().online) {
+      try {
+        const tempNumber = `QT-OFF-${Date.now().toString().slice(-6)}`;
+        const customerName = customers.find(c => c.id === form.customer_id)?.name || 'customer';
+        await enqueueOp('quotation.create', {
+          idempotency_key: crypto.randomUUID(),
+          id: crypto.randomUUID(),
+          temp_number: tempNumber,
+          customer_id: form.customer_id,
+          issue_date: form.issue_date,
+          expiry_date: form.expiry_date || null,
+          subtotal,
+          cart_discount_percent: form.cart_discount_percent || 0,
+          extra_discount: form.extra_discount || 0,
+          discount_amount: cartDiscountAmount,
+          tax_amount: quoteVat.taxAmount,
+          shipping_cost: form.shipping_cost || 0,
+          total_amount: quoteGrandTotal,
+          notes: form.notes || null,
+          reference: form.reference || null,
+          items: items.map(item => {
+            const discount = (item.unit_price * item.quantity * item.discount_percent) / 100;
+            return {
+              product_id: item.product_id,
+              quantity: item.quantity,
+              unit_price: item.unit_price,
+              discount_percent: item.discount_percent,
+              tax_rate: 0,
+              subtotal: item.quantity * item.unit_price - discount,
+              unit_name: item.selected_unit?.unit_name || item.product_unit || null,
+              unit_conversion_factor: item.selected_unit?.conversion_factor ?? null,
+              base_quantity: item.base_quantity,
+              warehouse_id: item.warehouse_id || null,
+            };
+          }),
+          cost_history: items.map(item => {
+            const unitName = item.selected_unit?.unit_name || item.product_unit || 'pcs';
+            const costPerUnit = item.cost_price || 0;
+            const totalCostAdded = costPerUnit * item.quantity;
+            return {
+              product_id: item.product_id,
+              product_name: item.product_name,
+              product_sku: item.product_sku || '',
+              unit: unitName,
+              quantity: item.quantity,
+              unit_price: item.unit_price,
+              cost_price_per_qty: costPerUnit,
+              cost_price_for_added_qty: totalCostAdded,
+              total_cost_price_single: costPerUnit,
+              total_cost_price_added: totalCostAdded,
+            };
+          }),
+        }, `Quotation ${formatCurrency(quoteGrandTotal)} — ${customerName}`);
+        toast({
+          title: 'Quotation queued offline',
+          description: `${tempNumber} (${formatCurrency(quoteGrandTotal)}) saved on this device — it will sync automatically when you reconnect.`,
+        });
+        onSaved();
+        onClose();
+      } catch (err: any) {
+        setError(err?.message || 'Could not queue the quotation offline');
+      }
+      return;
+    }
 
     setSaving(true);
     setError('');
@@ -1311,6 +1439,69 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
     e.preventDefault();
     if (!form.customer_id) { setError('Please select a customer'); return; }
     if (items.length === 0) { setError('Please add at least one item'); return; }
+
+    // Offline: queue the edit; sync_quotation_update replays it atomically
+    // (version-checked, items + cost snapshot replaced).
+    if (!networkMonitor.getState().online) {
+      try {
+        await enqueueOp('quotation.update', {
+          idempotency_key: crypto.randomUUID(),
+          id: quotation.id,
+          customer_id: form.customer_id,
+          issue_date: form.issue_date,
+          expiry_date: form.expiry_date || null,
+          subtotal,
+          cart_discount_percent: form.cart_discount_percent || 0,
+          extra_discount: form.extra_discount || 0,
+          discount_amount: cartDiscountAmount,
+          tax_amount: quoteVat.taxAmount,
+          shipping_cost: form.shipping_cost || 0,
+          total_amount: quoteGrandTotal,
+          notes: form.notes || null,
+          reference: form.reference || null,
+          expected_updated_at: quotation.updated_at || null,
+          items: items.map(item => {
+            const discount = (item.unit_price * item.quantity * item.discount_percent) / 100;
+            return {
+              product_id: item.product_id,
+              quantity: item.quantity,
+              unit_price: item.unit_price,
+              discount_percent: item.discount_percent,
+              tax_rate: 0,
+              subtotal: item.quantity * item.unit_price - discount,
+              unit_name: item.selected_unit?.unit_name || item.product_unit || null,
+              unit_conversion_factor: item.selected_unit?.conversion_factor ?? null,
+              base_quantity: item.base_quantity,
+              warehouse_id: item.warehouse_id || null,
+            };
+          }),
+          cost_history: items.map(item => {
+            const unitName = item.selected_unit?.unit_name || item.product_unit || 'pcs';
+            const costPerUnit = item.cost_price || 0;
+            const totalCostAdded = costPerUnit * item.quantity;
+            return {
+              product_id: item.product_id,
+              product_name: item.product_name,
+              product_sku: item.product_sku || '',
+              unit: unitName,
+              quantity: item.quantity,
+              unit_price: item.unit_price,
+              cost_price_per_qty: costPerUnit,
+              cost_price_for_added_qty: totalCostAdded,
+              total_cost_price_single: costPerUnit,
+              total_cost_price_added: totalCostAdded,
+            };
+          }),
+        }, `Edit quotation ${quotation.quote_number}`);
+        toast({ title: 'Edit queued offline', description: `${quotation.quote_number} changes will sync when you reconnect.` });
+        onSaved();
+        onClose();
+      } catch (err: any) {
+        setError(err?.message || 'Could not queue the edit offline');
+      }
+      return;
+    }
+
     setSaving(true);
     setError('');
 
@@ -1682,6 +1873,37 @@ function ConvertToInvoiceModal({ quotation, onClose, onConverted }: {
         );
         if (note) shortfallNotes[item.product_id] = note;
       }
+    }
+
+    // Offline: queue the conversion; sync_quotation_convert replays the same
+    // atomic RPC (server derives sale-unit costs, posts invoice + payment,
+    // flips the quotation to converted) when connectivity returns.
+    if (!networkMonitor.getState().online) {
+      try {
+        await enqueueOp('quotation.convert', {
+          idempotency_key: crypto.randomUUID(),
+          quotation_id: quotation.id,
+          options: {
+            invoice_date: form.invoice_date,
+            payment_type: form.payment_type,
+            amount_paid: form.amount_paid,
+            payment_method: form.payment_method,
+            reference_number: form.reference_number || null,
+            notes: form.notes || null,
+            shortfall_notes: shortfallNotes,
+          },
+        }, `Convert ${quotation.quote_number} → invoice`);
+        toast({
+          title: 'Conversion queued offline',
+          description: `${quotation.quote_number} will become an invoice when you reconnect — the invoice number is assigned at sync time.`,
+        });
+        onConverted();
+        onClose();
+      } catch (err: any) {
+        setError(err?.message || 'Could not queue the conversion offline');
+        setSaving(false);
+      }
+      return;
     }
 
     // One atomic RPC: invoice header + items + cost history + payment +

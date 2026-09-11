@@ -151,6 +151,15 @@ export default function POSPage() {
   const [creditConfirmOpen, setCreditConfirmOpen] = useState(false);
   const [pendingCreditCheck, setPendingCreditCheck] = useState<CreditCheck | null>(null);
   const creditConfirmedRef = useRef(false);
+  // Synchronous re-entrancy guard for processOrder — the `processing` state
+  // alone can't stop double-clicks because it flips on only after the stock
+  // and credit gates await, which can hang for seconds offline.
+  const processingRef = useRef(false);
+  // Idempotency key for the current checkout session. Every submission
+  // attempt of the same charge (double-click race, retry after an ambiguous
+  // failure) carries the same key; sync_invoice_create dedups on it so two
+  // outbox items can never become two invoices for one intent.
+  const chargeIntentIdRef = useRef<string>(crypto.randomUUID());
   const [insufficient, setInsufficient] = useState<{
     info: InsufficientStockInfo;
     product: ProductData;
@@ -750,6 +759,22 @@ export default function POSPage() {
   const grandTotal = posVat.total + (shipping || 0);
 
   async function processOrder() {
+    // One Charge click = one order. Extra clicks while a submission is in
+    // flight (the gates below await fetches that hang offline, before the
+    // disabled/`processing` feedback engages) must be swallowed, or each one
+    // enqueues its own offline order with a fresh idempotency id.
+    if (processingRef.current) return;
+    processingRef.current = true;
+    setProcessing(true);
+    try {
+      await doProcessOrder();
+    } finally {
+      processingRef.current = false;
+      setProcessing(false);
+    }
+  }
+
+  async function doProcessOrder() {
     if (cart.length === 0) { toast({ title: 'Cart is empty', variant: 'destructive' }); return; }
     if (!selectedCustomer) { toast({ title: 'Please select a customer first', variant: 'destructive' }); return; }
 
@@ -1113,6 +1138,10 @@ export default function POSPage() {
 
     try {
       await enqueueOp('invoice.create', {
+        id: crypto.randomUUID(),
+        idempotency_key: chargeIntentIdRef.current,
+        temp_number: tempNumber,
+        is_pos: true,
         customer_id: customerId,
         invoice_date: invoiceDate,
         subtotal,
@@ -1225,6 +1254,12 @@ export default function POSPage() {
   const [cartMaximized, setCartMaximized] = useState(false);
   const [cartTab, setCartTab] = useState<'items' | 'cost'>('items');
   const [showCheckout, setShowCheckout] = useState(false);
+  // Each checkout session is a fresh charge intent — a new idempotency key
+  // per modal open. Must sit after the showCheckout declaration: the
+  // dependency below evaluates during render.
+  useEffect(() => {
+    if (showCheckout) chargeIntentIdRef.current = crypto.randomUUID();
+  }, [showCheckout]);
   const [showCartFooter, setShowCartFooter] = useState(true);
   const [amountPaid, setAmountPaid] = useState('');
   const [defaultProductImage, setDefaultProductImage] = useState('');
