@@ -9,6 +9,8 @@
 import { supabaseRaw } from '@/lib/supabase-raw';
 import { cacheGet, cachePut, isNetworkError } from '@/lib/offline/cache';
 import { CACHE_KEYS } from '@/lib/offline/keys';
+import { REPLICA, replicaRows } from '@/lib/offline/replica';
+import { networkMonitor, raceDeadline } from '@/lib/offline/network';
 
 export interface LedgerStock {
   // `${productId}|${warehouseId}` → base-unit qty remaining in FIFO batches
@@ -47,10 +49,18 @@ export interface Shortfall {
 //
 // Every successful lookup is merged into an offline snapshot (per
 // product|warehouse pairs, so coverage accumulates across carts over time).
-// When the network is unreachable the snapshot is served with stale=true so
-// callers can soften hard blocks into warnings — offline data is advisory.
-// Returns null only when there is no snapshot either, so callers fail open
-// with a notice: the gate is advisory and the DB allows the sale either way.
+// Offline (or past the gate deadline) the snapshot plus the local replica's
+// batch ledger is served with stale=true so callers can soften hard blocks
+// into warnings — offline data is advisory. Returns null only when there is
+// no data either way, so callers fail open with a notice: the gate is
+// advisory and the DB allows the sale either way.
+// Interactive gate lookups must never hang the checkout. When the monitor
+// knows we're offline, the network is skipped entirely; when it believes we
+// are online, the lookup is raced against this deadline so a dead-but-
+// reported-online connection (monitor lag, captive portal) falls through to
+// the offline snapshot instead of stalling the sale.
+const GATE_DEADLINE_MS = 4_000;
+
 export async function fetchLedgerStockFor(
   productIds: string[],
   defaultWarehouseId?: string | null
@@ -59,15 +69,39 @@ export async function fetchLedgerStockFor(
   const defaultWh = defaultWarehouseId ?? (await resolveDefaultWarehouseId());
   if (ids.length === 0) return { byPair: {}, defaultWarehouseId: defaultWh };
 
-  const { data, error } = await supabaseRaw.rpc('get_batch_stock_by_product_warehouse', {
-    p_product_ids: ids,
-  });
+  let data: Awaited<ReturnType<typeof supabaseRaw.rpc>>['data'] = null;
+  let error: unknown = null;
+  let timedOut = false;
+  if (networkMonitor.getState().online) {
+    const raced = await raceDeadline(
+      supabaseRaw
+        .rpc('get_batch_stock_by_product_warehouse', { p_product_ids: ids })
+        .then((r) => ({ ok: true as const, r }), (e) => ({ ok: false as const, e })),
+      GATE_DEADLINE_MS
+    );
+    if (raced === 'timeout') {
+      timedOut = true;
+    } else if (!raced.ok) {
+      error = raced.e;
+    } else {
+      data = raced.r.data;
+      error = raced.r.error;
+    }
+  }
 
   if (error || !data) {
-    if (isNetworkError(error)) {
+    if (timedOut || isNetworkError(error)) {
       const cached = await cacheGet<LedgerStock>(CACHE_KEYS.gateStock);
-      if (cached) {
-        return { byPair: cached.byPair ?? {}, defaultWarehouseId: cached.defaultWarehouseId ?? defaultWh, stale: true };
+      // Offline fallback #1: the local replica's full batch ledger (refreshed
+      // every 15 min while online). Without it, any product never gate-checked
+      // online from this device reads "ledger 0" and false-fires the oversell
+      // warning — the gate snapshot only covers products in previous carts.
+      const replicaByPair = await ledgerByPairFromReplica(ids);
+      // Cached pairs come from the most recent ONLINE gate check, which can be
+      // newer than the last replica refresh — they win per pair.
+      const byPair = { ...replicaByPair, ...(cached?.byPair ?? {}) };
+      if (Object.keys(byPair).length > 0) {
+        return { byPair, defaultWarehouseId: cached?.defaultWarehouseId ?? defaultWh, stale: true };
       }
     }
     return null;
@@ -88,18 +122,54 @@ export async function fetchLedgerStockFor(
   return stock;
 }
 
-async function resolveDefaultWarehouseId(): Promise<string | null> {
-  const { data, error } = await supabaseRaw
-    .from('warehouses')
-    .select('id')
-    .eq('is_default', true)
-    .eq('is_active', true)
-    .limit(1);
-  if ((error || !data) && isNetworkError(error)) {
-    const cached = await cacheGet<Array<{ id: string; is_default: boolean; is_active: boolean }>>(CACHE_KEYS.warehouses);
-    return cached?.find((w) => w.is_default && w.is_active)?.id ?? null;
+// Sum quantity_remaining per product|warehouse from the local replica's
+// inventory_batches table, restricted to the requested products. A missing
+// pair means the product genuinely has no batch rows on this device's
+// snapshot — a legitimate ledger-zero.
+async function ledgerByPairFromReplica(ids: string[]): Promise<Record<string, number>> {
+  try {
+    const idSet = new Set(ids);
+    const batches = await replicaRows<any>(REPLICA['Inventory batches']);
+    const byPair: Record<string, number> = {};
+    for (const b of batches) {
+      const pid = String(b.product_id ?? '');
+      if (!idSet.has(pid)) continue;
+      const key = `${pid}|${b.warehouse_id ?? null}`;
+      byPair[key] = (byPair[key] ?? 0) + Number(b.quantity_remaining ?? 0);
+    }
+    return byPair;
+  } catch {
+    return {};
   }
-  return data?.[0]?.id ?? null;
+}
+
+async function resolveDefaultWarehouseId(): Promise<string | null> {
+  if (networkMonitor.getState().online) {
+    const raced = await raceDeadline(
+      supabaseRaw
+        .from('warehouses')
+        .select('id')
+        .eq('is_default', true)
+        .eq('is_active', true)
+        .limit(1)
+        .then((r) => ({ ok: true as const, r }), (e) => ({ ok: false as const, e })),
+      GATE_DEADLINE_MS
+    );
+    if (raced !== 'timeout' && raced.ok && !raced.r.error && raced.r.data?.length) {
+      return raced.r.data[0].id;
+    }
+  }
+  const cached = await cacheGet<Array<{ id: string; is_default: boolean; is_active: boolean }>>(CACHE_KEYS.warehouses);
+  const cachedDefault = cached?.find((w) => w.is_default && w.is_active)?.id;
+  if (cachedDefault) return cachedDefault;
+  // Last resort: the replica's warehouses table — without a default id,
+  // items with no warehouse_id read as ledger 0 and false-fire the gate.
+  try {
+    const warehouses = await replicaRows<any>(REPLICA['Warehouses']);
+    return warehouses.find((w) => w.is_default && w.is_active)?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // FIFO ledger qty available to an item. A NULL warehouse falls back to the
