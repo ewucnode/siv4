@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
@@ -8,12 +8,12 @@ import { formatCurrency, formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
 import { networkMonitor } from '@/lib/offline/network';
 import { enqueueOp } from '@/lib/offline/outbox';
-import { ArrowLeft, Phone, Mail, MapPin, Building, CreditCard, Calendar, ShoppingBag, DollarSign, Star, Pencil as Edit, Eye, Receipt, Truck, FileText, User, RotateCcw, Filter, Search, X, HandCoins, Printer, StickyNote, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, Phone, Mail, MapPin, Building, CreditCard, Calendar, ShoppingBag, DollarSign, Star, Pencil as Edit, Eye, Receipt, Truck, FileText, User, RotateCcw, Filter, Search, X, HandCoins, Printer, StickyNote, Plus, Trash2, BookOpen } from 'lucide-react';
 import type { Customer, Invoice, Quotation, Delivery, Payment } from '@/lib/types';
 import CollectPaymentModal from '@/components/CollectPaymentModal';
+import CustomerStatementModal from '@/components/CustomerStatementModal';
 import { fetchAll } from '@/lib/fetch-all';
 import { isInvoiceOverdue } from '@/lib/format';
-import { printNode } from '@/lib/print';
 
 interface SalesReturn {
   id: string;
@@ -93,18 +93,17 @@ export default function CustomerDetailPage() {
   const [activeTab, setActiveTab] = useState<'invoices' | 'payments' | 'quotations' | 'deliveries' | 'receivables' | 'returns' | 'notes'>('invoices');
   const [payments, setPayments] = useState<Payment[]>([]);
   const [showCollect, setShowCollect] = useState(false);
+  const [showStatement, setShowStatement] = useState(false);
   const [notes, setNotes] = useState<CustomerNote[]>([]);
   const [newNote, setNewNote] = useState('');
   const [newNoteType, setNewNoteType] = useState<CustomerNote['note_type']>('general');
   const [noteSaving, setNoteSaving] = useState(false);
-  const [statement, setStatement] = useState<any[] | null>(null);
-  const [printing, setPrinting] = useState(false);
-  const statementRef = useRef<HTMLDivElement>(null);
 
   // Receivables filter state
   const [receivablesFilter, setReceivablesFilter] = useState<'all' | 'invoice' | 'manual'>('all');
   const [receivablesDateFrom, setReceivablesDateFrom] = useState('');
   const [receivablesDateTo, setReceivablesDateTo] = useState('');
+  const [showReversals, setShowReversals] = useState(false);
 
   useEffect(() => { loadCustomerData(); }, [customerId]);
 
@@ -130,7 +129,7 @@ export default function CustomerDetailPage() {
       fetchAll(() => supabase.from('quotations').select('*').eq('customer_id', customerId).order('created_at', { ascending: false }).order('id')),
       fetchAll(() => supabase.from('deliveries').select('*').eq('customer_id', customerId).order('created_at', { ascending: false }).order('id')),
       supabase.from('journal_entries').select('id, entry_number, entry_date, description, total_debit, created_at').eq('customer_id', customerId).eq('reference_type', 'receivable').eq('is_posted', true).order('entry_date', { ascending: false }),
-      supabase.from('payments').select('reference_id, amount, bad_debt_amount').eq('reference_type', 'receivable'),
+      supabase.from('payments').select('reference_id, amount, bad_debt_amount').eq('reference_type', 'receivable').eq('customer_id', customerId),
       supabase.from('sales_returns').select('*, invoice:invoices(invoice_number)').eq('customer_id', customerId).order('created_at', { ascending: false }),
       supabase.from('customer_store_credits').select('balance').eq('customer_id', customerId).eq('status', 'active'),
       fetchAll(() => supabase.from('payments').select('*').eq('customer_id', customerId).order('payment_date', { ascending: false }).order('id')),
@@ -167,7 +166,11 @@ export default function CustomerDetailPage() {
     const invData = invRes;
     const returnsData = returnsRes.data || [];
     const totalPaid = invData.reduce((s, i) => s + Number(i.amount_paid), 0);
-    const totalOut = invData.reduce((s, i) => s + Number(i.balance_due ?? i.total_amount - i.amount_paid), 0);
+    // Cancelled invoices are excluded — the receivables table filters them,
+    // and the summary card must agree with the table total below it
+    const totalOut = invData
+      .filter(i => i.status !== 'cancelled')
+      .reduce((s, i) => s + Number(i.balance_due ?? i.total_amount - i.amount_paid), 0);
     const manualReceivablesOutstanding = receivablesWithPayments.reduce((s, r) => s + r.outstanding_balance, 0);
     const totalRefunds = returnsData.reduce((s, r) => s + Number(r.total_refund_amount), 0);
     const actualTotalPurchases = (invTotalsRes.data || []).reduce((s, i) => s + Number(i.total_amount), 0);
@@ -258,25 +261,6 @@ export default function CustomerDetailPage() {
     setNotes(notes.filter(n => n.id !== noteId));
   }
 
-  async function handlePrintStatement() {
-    setPrinting(true);
-    try {
-      if (!statement) {
-        const { data, error } = await supabase.rpc('get_customer_ar_statement', { p_customer_id: customerId });
-        if (error) throw error;
-        setStatement((data || []) as any[]);
-        // Wait for the off-screen statement to render before printing it
-        setTimeout(() => printNode(statementRef.current), 150);
-      } else {
-        printNode(statementRef.current);
-      }
-    } catch (err: any) {
-      toast({ title: 'Error', description: err.message || 'Failed to build statement', variant: 'destructive' });
-    } finally {
-      setPrinting(false);
-    }
-  }
-
   // Combine and filter receivables
   const getFilteredReceivables = (): ReceivableItem[] => {
     const invoiceReceivables: InvoiceReceivable[] = invoices
@@ -338,6 +322,20 @@ export default function CustomerDetailPage() {
 
   const filteredReceivables = getFilteredReceivables();
 
+  // Payment layers. "Live" rows are the current assertion of money that
+  // actually moved: receipts not superseded by an edit/cancel, plus real
+  // refunds (RVP- / sales-return). REV- rows are bookkeeping mirrors of
+  // superseded receipts — no cash event — and receipts with is_reversed
+  // were superseded by a later edit/cancel. Both stay in the audit trail
+  // (toggle) but never enter the totals.
+  const isReversalRow = (p: Payment) => !!p.payment_number?.startsWith('REV-');
+  const isLivePayment = (p: Payment) =>
+    !isReversalRow(p) && !(p.payment_type === 'received' && p.is_reversed);
+  const livePayments = payments.filter(isLivePayment);
+  const actualCollected = livePayments.filter(p => p.payment_type === 'received').reduce((s, p) => s + Number(p.amount), 0);
+  const actualRefunded = livePayments.filter(p => p.payment_type === 'refund').reduce((s, p) => s + Number(p.amount), 0);
+  const reversalCount = payments.length - livePayments.length;
+
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="flex items-center gap-4">
@@ -350,10 +348,9 @@ export default function CustomerDetailPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={handlePrintStatement}
-            disabled={printing}
-            className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition disabled:opacity-50"
-            title="Print the receivable statement for this customer"
+            onClick={() => setShowStatement(true)}
+            className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition"
+            title="Period statement or AR ledger — preview and print for the customer"
           >
             <Printer className="w-4 h-4" />Statement
           </button>
@@ -365,6 +362,13 @@ export default function CustomerDetailPage() {
               <HandCoins className="w-4 h-4" />Collect Payment
             </button>
           )}
+          <Link
+            href={`/accounting/journal?customer=${customer.id}`}
+            className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition"
+            title="This customer's journal entries — invoices, payments, COGS"
+          >
+            <BookOpen className="w-4 h-4" />Journal
+          </Link>
           <Link href={`/crm?edit=${customer.id}`} className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">
             <Edit className="w-4 h-4" />Edit
           </Link>
@@ -517,7 +521,7 @@ export default function CustomerDetailPage() {
             <div className="flex border-b border-border overflow-x-auto">
               {[
                 { key: 'invoices', label: 'Invoices', icon: Receipt },
-                { key: 'payments', label: `Payments${payments.length > 0 ? ` (${payments.length})` : ''}`, icon: HandCoins },
+                { key: 'payments', label: `Payments${livePayments.length > 0 ? ` (${livePayments.length})` : ''}`, icon: HandCoins },
                 { key: 'returns', label: `Returns${salesReturns.length > 0 ? ` (${salesReturns.length})` : ''}`, icon: RotateCcw },
                 { key: 'receivables', label: 'Receivables', icon: User },
                 { key: 'quotations', label: 'Quotations', icon: FileText },
@@ -590,31 +594,64 @@ export default function CustomerDetailPage() {
 
               {activeTab === 'payments' && (
                 <div className="space-y-4">
-                  {/* Payment summary cards */}
+                  {/* Actual money movement — live layer only (see isLivePayment):
+                      receipts not superseded by edits/cancels, minus real refunds */}
                   <div className="grid grid-cols-3 gap-3">
                     <div className="bg-green-50 rounded-lg p-3">
-                      <p className="text-xs text-green-600 font-medium">Total Collected</p>
-                      <p className="text-lg font-bold text-green-700">{formatCurrency(payments.filter(p => p.payment_type === 'received').reduce((s, p) => s + Number(p.amount), 0))}</p>
+                      <p className="text-xs text-green-600 font-medium">Collected (actual)</p>
+                      <p className="text-lg font-bold text-green-700">{formatCurrency(actualCollected)}</p>
+                      <p className="text-[10px] text-green-600/70">cash received, net of edit/cancel reversals</p>
                     </div>
-                    <div className="bg-orange-50 rounded-lg p-3">
-                      <p className="text-xs text-orange-600 font-medium">Total Bad Debt</p>
-                      <p className="text-lg font-bold text-orange-700">{formatCurrency(payments.reduce((s, p) => s + Number(p.bad_debt_amount || 0), 0))}</p>
+                    <div className="bg-red-50 rounded-lg p-3">
+                      <p className="text-xs text-red-600 font-medium">Refunded (actual)</p>
+                      <p className="text-lg font-bold text-red-700">{formatCurrency(actualRefunded)}</p>
+                      <p className="text-[10px] text-red-600/70">money returned to the customer</p>
                     </div>
                     <div className="bg-blue-50 rounded-lg p-3">
-                      <p className="text-xs text-blue-600 font-medium">Total Payments</p>
-                      <p className="text-lg font-bold text-blue-700">{payments.length}</p>
+                      <p className="text-xs text-blue-600 font-medium">Net Cash</p>
+                      <p className="text-lg font-bold text-blue-700">{formatCurrency(actualCollected - actualRefunded)}</p>
+                      <p className="text-[10px] text-blue-600/70">
+                        {livePayments.length} live payment{livePayments.length === 1 ? '' : 's'}
+                        {reversalCount > 0 ? ` · ${reversalCount} reversal row${reversalCount === 1 ? '' : 's'} hidden` : ''}
+                      </p>
                     </div>
                   </div>
 
-                  {/* Payments table */}
+                  {/* Audit controls: bad-debt note + reversal toggle */}
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    {livePayments.reduce((s, p) => s + Number(p.bad_debt_amount || 0), 0) > 0 ? (
+                      <p className="text-xs text-orange-600">
+                        Bad debt written off: {formatCurrency(livePayments.reduce((s, p) => s + Number(p.bad_debt_amount || 0), 0))}
+                      </p>
+                    ) : <span />}
+                    {reversalCount > 0 && (
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={showReversals}
+                          onChange={e => setShowReversals(e.target.checked)}
+                          className="accent-blue-600"
+                        />
+                        Show edit/cancel reversals ({reversalCount})
+                      </label>
+                    )}
+                  </div>
+
+                  {/* Payments table — live rows by default, full audit ledger with the toggle */}
                   <div className="overflow-x-auto">
                     {payments.length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground text-sm">
                         <HandCoins className="w-10 h-10 mx-auto mb-2 opacity-30" />
                         No payments recorded yet
                       </div>
+                    ) : (showReversals ? payments : livePayments).length === 0 ? (
+                      <div className="text-center py-8 text-muted-foreground text-sm">
+                        <HandCoins className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                        Every payment on this account was reversed by an invoice edit/cancel —
+                        enable &quot;Show edit/cancel reversals&quot; for the audit trail.
+                      </div>
                     ) : (
-                      <table className="w-full">
+                        <table className="w-full">
                         <thead>
                           <tr className="border-b border-border">
                             <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Payment #</th>
@@ -628,18 +665,41 @@ export default function CustomerDetailPage() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-border">
-                          {payments.map(p => (
-                            <tr key={p.id} className="hover:bg-muted/30">
+                          {(showReversals ? payments : livePayments).map(p => {
+                            const reversal = isReversalRow(p);
+                            const superseded = p.payment_type === 'received' && p.is_reversed;
+                            return (
+                            <tr key={p.id} className={`hover:bg-muted/30 ${reversal || superseded ? 'opacity-60' : ''}`}>
                               <td className="px-3 py-2 text-sm font-semibold text-blue-600">{p.payment_number}</td>
                               <td className="px-3 py-2 text-sm text-muted-foreground">{formatDate(p.payment_date)}</td>
                               <td className="px-3 py-2">
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${p.reference_type === 'invoice' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'}`}>
-                                  {p.reference_type}
+                                {reversal ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600" title="Accounting reversal from an invoice edit/cancel — no money moved">
+                                    reversal
+                                  </span>
+                                ) : superseded ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600" title="Superseded by an invoice edit/cancel — replaced by a later payment">
+                                    received · superseded
+                                  </span>
+                                ) : (
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${p.payment_type === 'received' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
+                                    {p.payment_type === 'received' ? 'received' : 'refund'}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${p.reference_type === 'invoice' ? 'bg-blue-50 text-blue-600' : p.reference_type === 'receivable' ? 'bg-purple-50 text-purple-600' : 'bg-slate-50 text-slate-600'}`}>
+                                  {p.reference_type?.replace('invoice_cancel', 'invoice (cancelled)').replace('invoice_edit', 'invoice (edit)')}
                                 </span>
                               </td>
-                              <td className="px-3 py-2 text-sm capitalize text-muted-foreground">{p.payment_type}</td>
                               <td className="px-3 py-2 text-sm capitalize text-muted-foreground">{p.payment_method.replace(/_/g, ' ')}</td>
-                              <td className="px-3 py-2 text-sm text-right font-semibold text-green-600">{formatCurrency(Number(p.amount))}</td>
+                              <td className={`px-3 py-2 text-sm text-right font-semibold ${
+                                reversal || superseded ? 'text-slate-500'
+                                  : p.payment_type === 'refund' ? 'text-red-600'
+                                  : 'text-green-600'
+                              }`}>
+                                {p.payment_type === 'refund' ? '−' : ''}{formatCurrency(Number(p.amount))}
+                              </td>
                               <td className="px-3 py-2 text-sm text-right font-semibold">
                                 {Number(p.bad_debt_amount || 0) > 0 ? (
                                   <span className="text-orange-600">{formatCurrency(Number(p.bad_debt_amount))}</span>
@@ -649,13 +709,14 @@ export default function CustomerDetailPage() {
                               </td>
                               <td className="px-3 py-2 text-sm text-muted-foreground">{p.reference_number || '—'}</td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                         <tfoot>
                           <tr className="bg-muted/40 border-t-2 border-border">
-                            <td colSpan={5} className="px-3 py-2 text-sm font-semibold text-muted-foreground">Total</td>
-                            <td className="px-3 py-2 text-sm text-right font-bold text-green-600">{formatCurrency(payments.filter(p => p.payment_type === 'received').reduce((s, p) => s + Number(p.amount), 0))}</td>
-                            <td className="px-3 py-2 text-sm text-right font-bold text-orange-600">{formatCurrency(payments.reduce((s, p) => s + Number(p.bad_debt_amount || 0), 0))}</td>
+                            <td colSpan={5} className="px-3 py-2 text-sm font-semibold text-muted-foreground">Total (actual)</td>
+                            <td className="px-3 py-2 text-sm text-right font-bold text-green-600">{formatCurrency(actualCollected)}</td>
+                            <td className="px-3 py-2 text-sm text-right font-bold text-orange-600">{formatCurrency(livePayments.reduce((s, p) => s + Number(p.bad_debt_amount || 0), 0))}</td>
                             <td></td>
                           </tr>
                         </tfoot>
@@ -1001,60 +1062,12 @@ export default function CustomerDetailPage() {
         />
       )}
 
-      {/* Off-screen statement for printing (printNode prints this node) */}
-      <div ref={statementRef} className="bg-white p-6 text-black" style={{ width: '760px' }}>
-        <div className="flex items-baseline justify-between border-b-2 border-black pb-2 mb-3">
-          <div>
-            <h1 className="text-lg font-bold">Customer Statement</h1>
-            <p className="text-sm">{customer.name} ({customer.code}){customer.company_name ? ` — ${customer.company_name}` : ''}</p>
-            {customer.phone && <p className="text-xs">{customer.phone}</p>}
-            {customer.address && <p className="text-xs">{customer.address}{customer.city ? `, ${customer.city}` : ''}</p>}
-          </div>
-          <div className="text-right text-xs">
-            <p className="font-semibold">{new Date().toLocaleDateString()}</p>
-            <p>Credit terms: {customer.credit_days} days</p>
-            {Number(customer.credit_limit) > 0 && <p>Limit: {formatCurrency(customer.credit_limit)}</p>}
-          </div>
-        </div>
-
-        <div className="flex gap-4 mb-3 text-xs">
-          <div className="flex-1 border border-black p-2">
-            <p className="font-semibold border-b border-black pb-1 mb-1">Summary</p>
-            <div className="flex justify-between"><span>Lifetime purchases</span><span className="font-mono">{formatCurrency(stats.totalPurchases)}</span></div>
-            <div className="flex justify-between"><span>Total returned</span><span className="font-mono">{formatCurrency(stats.totalRefunds)}</span></div>
-            <div className="flex justify-between font-bold"><span>Balance due</span><span className="font-mono">{formatCurrency(customer.outstanding_balance)}</span></div>
-          </div>
-        </div>
-
-        <table className="w-full border-collapse text-[11px]" style={{ tableLayout: 'fixed' }}>
-          <thead>
-            <tr>
-              {['Date', 'Entry #', 'Type', 'Description', 'Debit', 'Credit', 'Balance'].map(h => (
-                <th key={h} className="border border-black px-1.5 py-1.5 text-left bg-gray-100">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {!statement || statement.length === 0 ? (
-              <tr><td className="border border-black px-1.5 py-3 text-center" colSpan={7}>No receivable activity</td></tr>
-            ) : statement.map((row: any, i: number) => (
-              <tr key={i}>
-                <td className="border border-black px-1.5 py-1.5">{formatDate(row.entry_date)}</td>
-                <td className="border border-black px-1.5 py-1.5">{row.entry_number}</td>
-                <td className="border border-black px-1.5 py-1.5">{row.doc_type}</td>
-                <td className="border border-black px-1.5 py-1.5 truncate">{row.description}</td>
-                <td className="border border-black px-1.5 py-1.5 text-right font-mono">{Number(row.debit) > 0 ? formatCurrency(row.debit) : ''}</td>
-                <td className="border border-black px-1.5 py-1.5 text-right font-mono">{Number(row.credit) > 0 ? formatCurrency(row.credit) : ''}</td>
-                <td className="border border-black px-1.5 py-1.5 text-right font-mono">{formatCurrency(row.balance)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <p className="text-[10px] mt-2 text-gray-600">
-          Debit increases what the customer owes (invoices, receivables). Credit reduces it (payments, returns, bad debt).
-          Generated from the customer profile · {statement?.length ?? 0} entr{(statement?.length ?? 0) === 1 ? 'y' : 'ies'}.
-        </p>
-      </div>
+      {showStatement && customer && (
+        <CustomerStatementModal
+          customer={customer}
+          onClose={() => setShowStatement(false)}
+        />
+      )}
     </div>
   );
 }

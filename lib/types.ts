@@ -469,13 +469,14 @@ export type PaymentMethod = 'cash' | 'bank_transfer' | 'bkash' | 'nagad' | 'rock
 export interface Payment {
   id: string;
   payment_number: string;
-  payment_type: 'received' | 'made';
-  reference_type: 'invoice' | 'purchase_order' | 'advance' | 'refund' | 'receivable' | 'payable';
+  payment_type: 'received' | 'made' | 'refund';
+  reference_type: 'invoice' | 'invoice_edit' | 'invoice_cancel' | 'purchase_order' | 'advance' | 'refund' | 'receivable' | 'payable';
   reference_id: string;
   customer_id?: string;
   supplier_id?: string;
   amount: number;
   bad_debt_amount?: number;
+  is_reversed?: boolean;
   payment_method: PaymentMethod;
   payment_date: string;
   reference_number?: string;
