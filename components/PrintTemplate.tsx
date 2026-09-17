@@ -63,6 +63,7 @@ export interface PrintTemplateProps {
   hideDiscountPercent?: boolean;
   hideRate?: boolean;
   hideItemDiscount?: boolean;
+  recalculatedSubtotal?: number;
   totalAmount: number;
   amountPaid?: number;
   balanceDue?: number;
@@ -143,6 +144,7 @@ export default function PrintTemplate({
   hideDiscountPercent = false,
   hideRate = false,
   hideItemDiscount = false,
+  recalculatedSubtotal,
   totalAmount,
   amountPaid = 0,
   balanceDue = 0,
@@ -579,7 +581,7 @@ export default function PrintTemplate({
                   </td>
                   <td style={{ padding: '3px 8px', textAlign: 'center', fontSize: '11px', color: '#555' }}>{item.unit_name || '—'}</td>
                   <td style={{ padding: '3px 8px', textAlign: 'center', fontSize: '11px' }}>{item.quantity}</td>
-                  {!(hideRate || hideDiscountPercent) && (
+                  {!hideRate && (
                     <td style={{ padding: '3px 8px', textAlign: 'right', fontSize: '11px' }}>{Number(item.unit_price).toFixed(2)}</td>
                   )}
                   {!hideDiscountPercent && (
@@ -665,7 +667,7 @@ export default function PrintTemplate({
               <tbody>
                 <tr>
                   <td style={{ padding: '2px 0', color: '#555' }}>Subtotal</td>
-                  <td style={{ padding: '2px 0', textAlign: 'right', fontWeight: '500' }}>{fmt(subtotal + discountTotal)}</td>
+                  <td style={{ padding: '2px 0', textAlign: 'right', fontWeight: '500' }}>{fmt(recalculatedSubtotal ?? subtotal)}</td>
                 </tr>
                 {discountTotal > 0 && !hideItemDiscount && (
                   <tr>
