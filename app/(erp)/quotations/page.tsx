@@ -4,8 +4,10 @@ import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency, formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Plus, Search, Eye, Send, X, Trash2, FileText, ArrowRight, UserPlus, CreditCard, DollarSign, CircleCheck as CheckCircle, Printer, Share2, MessageCircle, Mail, Filter, ChevronDown, TriangleAlert as AlertTriangle, Pencil, Ban, Bell, Clock, ClipboardPaste, Copy, ShoppingCart, LayoutGrid, Package } from 'lucide-react';
+import { Plus, Search, Eye, Send, X, Trash2, FileText, ArrowRight, UserPlus, CreditCard, DollarSign, CircleCheck as CheckCircle, Printer, Share2, MessageCircle, Mail, Filter, ChevronDown, TriangleAlert as AlertTriangle, Pencil, Ban, Bell, Clock, ClipboardPaste, Copy, ShoppingCart, LayoutGrid } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { ProductGalleryBody } from '@/components/ProductGallery';
+import { fetchAll } from '@/lib/fetch-all';
 import type { Quotation, QuotationStatus, Customer, Product, ProductUnit, PurchaseReminder } from '@/lib/types';
 import { loadVatSettings, computeVat, type VatSettings } from '@/lib/vat';
 import { isMultiUnitEnabled, getDefaultSaleUnit, convertToBaseUnit } from '@/lib/unit-utils';
@@ -54,6 +56,7 @@ export default function QuotationsPage() {
   const [convertingQuotation, setConvertingQuotation] = useState<QuotationWithCustomer | null>(null);
   const [editingQuotation, setEditingQuotation] = useState<QuotationWithCustomer | null>(null);
   const [deletingQuotation, setDeletingQuotation] = useState<QuotationWithCustomer | null>(null);
+  const [confirmingStatus, setConfirmingStatus] = useState<{ quotation: QuotationWithCustomer; action: 'sent' | 'accepted' | 'rejected' | 'expired' } | null>(null);
   const [companySettings, setCompanySettings] = useState<any>({});
   const [warehouses, setWarehouses] = useState<{ id: string; name: string; code: string }[]>([]);
 
@@ -62,15 +65,17 @@ export default function QuotationsPage() {
   async function loadData() {
     setLoading(true);
     const [quoteRes, custRes, prodRes, settingsRes, whRes] = await Promise.all([
-      supabase.from('quotations').select('*, customer:customers(name, code, phone, email, address)').order('created_at', { ascending: false }),
-      supabase.from('customers').select('*').eq('is_active', true).order('name'),
-      supabase.from('products').select(`*, units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order), inventory_items(id, warehouse_id, quantity_on_hand)`).eq('is_active', true).order('name'),
+      // fetchAll pages past Supabase's 1,000-row default cap; deterministic
+      // .order('id') tiebreakers keep rows stable across pages.
+      fetchAll(() => supabase.from('quotations').select('*, customer:customers(name, code, phone, email, address)').order('created_at', { ascending: false }).order('id')),
+      fetchAll(() => supabase.from('customers').select('*').eq('is_active', true).order('name').order('id')),
+      fetchAll(() => supabase.from('products').select(`*, units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order), inventory_items(id, warehouse_id, quantity_on_hand)`).eq('is_active', true).order('name').order('id')),
       supabase.from('app_settings').select('setting_value').eq('setting_key', 'company').maybeSingle(),
       supabase.from('warehouses').select('id, name, code').eq('is_active', true).order('is_default', { ascending: false }).order('name'),
     ]);
-    setQuotations(quoteRes.data || []);
-    setCustomers(custRes.data || []);
-    setProducts(prodRes.data || []);
+    setQuotations(quoteRes || []);
+    setCustomers(custRes || []);
+    setProducts(prodRes || []);
     setCompanySettings(settingsRes.data?.setting_value || {});
     setWarehouses(whRes.data || []);
     setLoading(false);
@@ -180,7 +185,7 @@ export default function QuotationsPage() {
   }
 
   const filtered = quotations.filter(q => {
-    if (search && !q.quote_number.toLowerCase().includes(search.toLowerCase()) && !q.customer?.name?.toLowerCase().includes(search.toLowerCase())) return false;
+    if (search && !q.quote_number.toLowerCase().includes(search.toLowerCase()) && !q.customer?.name?.toLowerCase().includes(search.toLowerCase()) && !((q as any).reference || '').toLowerCase().includes(search.toLowerCase())) return false;
     if (filterStatus && q.status !== filterStatus) return false;
     if (filterCustomer && q.customer_id !== filterCustomer) return false;
     if (filterDateFrom && q.issue_date < filterDateFrom) return false;
@@ -366,16 +371,16 @@ export default function QuotationsPage() {
                           <button onClick={() => openEditModal(q)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition" title="Edit Quotation"><Pencil className="w-3.5 h-3.5" /></button>
                         )}
                         {q.status === 'draft' && (
-                          <button onClick={() => sendQuotation(q)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-green-50 text-muted-foreground hover:text-green-600 transition"><Send className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setConfirmingStatus({ quotation: q, action: 'sent' })} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-green-50 text-muted-foreground hover:text-green-600 transition" title="Mark as Sent"><Send className="w-3.5 h-3.5" /></button>
                         )}
                         {(q.status === 'draft' || q.status === 'sent' || q.status === 'viewed') && (
-                          <button onClick={() => setQuotationStatus(q, 'accepted')} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-green-50 text-muted-foreground hover:text-green-600 transition" title="Mark Accepted"><CheckCircle className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setConfirmingStatus({ quotation: q, action: 'accepted' })} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-green-50 text-muted-foreground hover:text-green-600 transition" title="Mark Accepted"><CheckCircle className="w-3.5 h-3.5" /></button>
                         )}
                         {(q.status === 'draft' || q.status === 'sent' || q.status === 'viewed') && (
-                          <button onClick={() => setQuotationStatus(q, 'rejected')} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition" title="Mark Rejected"><Ban className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setConfirmingStatus({ quotation: q, action: 'rejected' })} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition" title="Mark Rejected"><Ban className="w-3.5 h-3.5" /></button>
                         )}
                         {(q.status === 'draft' || q.status === 'sent' || q.status === 'viewed' || q.status === 'accepted') && (
-                          <button onClick={() => setQuotationStatus(q, 'expired')} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-orange-50 text-muted-foreground hover:text-orange-600 transition" title="Mark Expired"><Clock className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setConfirmingStatus({ quotation: q, action: 'expired' })} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-orange-50 text-muted-foreground hover:text-orange-600 transition" title="Mark Expired"><Clock className="w-3.5 h-3.5" /></button>
                         )}
                         {(q.status === 'draft' || q.status === 'sent') && (
                           <button onClick={() => setDeletingQuotation(q)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition" title="Delete Quotation"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -452,6 +457,20 @@ export default function QuotationsPage() {
           quotation={deletingQuotation}
           onClose={() => setDeletingQuotation(null)}
           onConfirm={() => deleteQuotation(deletingQuotation)}
+        />
+      )}
+
+      {confirmingStatus && (
+        <StatusConfirmModal
+          quotation={confirmingStatus.quotation}
+          action={confirmingStatus.action}
+          onClose={() => setConfirmingStatus(null)}
+          onConfirm={() => {
+            const { quotation, action } = confirmingStatus;
+            setConfirmingStatus(null);
+            if (action === 'sent') sendQuotation(quotation);
+            else setQuotationStatus(quotation, action);
+          }}
         />
       )}
     </div>
@@ -620,6 +639,25 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
   const [showAddCustomer, setShowAddCustomer] = useState(false);
   const [showProductGallery, setShowProductGallery] = useState(false);
   const [formTab, setFormTab] = useState<'items' | 'cost'>('items');
+
+  // Global bridge: the QuickActionDrawer's Product Catalog dispatches a
+  // 'quotation:add-product' window event; add it to the open form's items.
+  const addProductRef = useRef(addProductToItems);
+  addProductRef.current = addProductToItems;
+  useEffect(() => {
+    (window as any).__quotationFormOpen = true;
+    function handler(e: Event) {
+      const product = (e as CustomEvent).detail;
+      if (!product) return;
+      addProductRef.current(product);
+      toast({ title: 'Added', description: `${product.name} added to the quotation` });
+    }
+    window.addEventListener('quotation:add-product', handler);
+    return () => {
+      (window as any).__quotationFormOpen = false;
+      window.removeEventListener('quotation:add-product', handler);
+    };
+  }, []);
   const [markedForPurchase, setMarkedForPurchase] = useState<Set<string>>(new Set());
 
   async function toggleMarkForPurchase(productId: string, productName: string, productSku: string, stockQty: number | null, quantityNeeded: number, quotationId?: string) {
@@ -990,7 +1028,8 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
   return (
     <>
       <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-        <div className="bg-white rounded-2xl w-full max-w-3xl shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className={`bg-white rounded-2xl w-full shadow-2xl max-h-[90vh] flex transition-[max-width] duration-300 overflow-hidden ${showProductGallery ? 'max-w-6xl' : 'max-w-3xl'}`}>
+          <div className="flex-1 min-w-0 max-h-[90vh] overflow-y-auto">
           <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white z-10">
             <h2 className="text-base font-bold">Create Quotation</h2>
             <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
@@ -1032,6 +1071,10 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
               <label className="block text-xs font-medium mb-1">Reference</label>
               <input type="text" value={form.reference} onChange={e => setForm({ ...form, reference: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" placeholder="Reference person name (e.g. who referred this quotation)" />
             </div>
+            <div>
+              <label className="block text-xs font-medium mb-1">Notes</label>
+              <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 resize-y" placeholder="Optional notes — shown on the printed quotation" />
+            </div>
 
             <div>
               <div className="flex items-center gap-1 mb-3 border-b border-border">
@@ -1055,7 +1098,7 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
                 <button type="button" onClick={pasteProductList} className="flex items-center gap-1.5 px-3 py-2 border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Paste products copied from an invoice or quotation">
                   <ClipboardPaste className="w-3.5 h-3.5" />Paste Products
                 </button>
-                <button type="button" onClick={() => setShowProductGallery(true)} className="flex items-center gap-1.5 px-3 py-2 border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Browse all products with images">
+                <button type="button" onClick={() => setShowProductGallery(v => !v)} className="flex items-center gap-1.5 px-3 py-2 border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Browse all products">
                   <LayoutGrid className="w-3.5 h-3.5" />Browse
                 </button>
               </div>
@@ -1315,6 +1358,15 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
               </button>
             </div>
           </form>
+          </div>
+          {showProductGallery && (
+            <div className="w-[380px] shrink-0 border-l border-border max-h-[90vh] overflow-y-auto bg-muted/10">
+              <ProductGalleryBody
+                products={products}
+                onPick={(product) => { addProductToItems(product); toast({ title: 'Added', description: `${product.name} added to the quotation` }); }}
+              />
+            </div>
+          )}
         </div>
       </div>
 
@@ -1328,14 +1380,6 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
             setForm(f => ({ ...f, customer_id: id }));
             setShowAddCustomer(false);
           }}
-        />
-      )}
-
-      {showProductGallery && (
-        <ProductGalleryModal
-          products={products}
-          onPick={(product) => { addProductToItems(product); toast({ title: 'Added', description: `${product.name} added to the quotation` }); }}
-          onClose={() => setShowProductGallery(false)}
         />
       )}
     </>
@@ -1376,6 +1420,25 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
   const [error, setError] = useState('');
   const [markedForPurchase, setMarkedForPurchase] = useState<Set<string>>(new Set());
   const [showProductGallery, setShowProductGallery] = useState(false);
+
+  // Global bridge: the QuickActionDrawer's Product Catalog dispatches a
+  // 'quotation:add-product' window event; add it to the open form's items.
+  const addProductRef = useRef(addProductToItems);
+  addProductRef.current = addProductToItems;
+  useEffect(() => {
+    (window as any).__quotationFormOpen = true;
+    function handler(e: Event) {
+      const product = (e as CustomEvent).detail;
+      if (!product) return;
+      addProductRef.current(product);
+      toast({ title: 'Added', description: `${product.name} added to the quotation` });
+    }
+    window.addEventListener('quotation:add-product', handler);
+    return () => {
+      (window as any).__quotationFormOpen = false;
+      window.removeEventListener('quotation:add-product', handler);
+    };
+  }, []);
 
   async function toggleMarkForPurchase(productId: string, productName: string, productSku: string, stockQty: number | null, quantityNeeded: number, quotationId?: string) {
     const isCurrentlyMarked = markedForPurchase.has(productId);
@@ -1738,7 +1801,8 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-3xl shadow-2xl max-h-[90vh] overflow-y-auto">
+      <div className={`bg-white rounded-2xl w-full shadow-2xl max-h-[90vh] flex transition-[max-width] duration-300 overflow-hidden ${showProductGallery ? 'max-w-6xl' : 'max-w-3xl'}`}>
+        <div className="flex-1 min-w-0 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white z-10">
           <div>
             <h2 className="text-base font-bold">Edit Quotation</h2>
@@ -1772,6 +1836,10 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
             <input type="text" value={form.reference} onChange={e => setForm({ ...form, reference: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" placeholder="Reference person name" />
           </div>
           <div>
+            <label className="block text-xs font-medium mb-1">Notes</label>
+            <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 resize-y" placeholder="Optional notes — shown on the printed quotation" />
+          </div>
+          <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs font-medium">Line Items</label>
               {items.length > 0 && <span className="text-xs text-muted-foreground">{items.length} item{items.length !== 1 ? 's' : ''}</span>}
@@ -1786,7 +1854,7 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
               <button type="button" onClick={pasteProductList} className="flex items-center gap-1.5 px-3 py-2 border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Paste products copied from an invoice or quotation">
                 <ClipboardPaste className="w-3.5 h-3.5" />Paste Products
               </button>
-              <button type="button" onClick={() => setShowProductGallery(true)} className="flex items-center gap-1.5 px-3 py-2 border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Browse all products with images">
+              <button type="button" onClick={() => setShowProductGallery(v => !v)} className="flex items-center gap-1.5 px-3 py-2 border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Browse all products">
                 <LayoutGrid className="w-3.5 h-3.5" />Browse
               </button>
             </div>
@@ -1894,15 +1962,76 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
             <button type="submit" disabled={saving} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-60">{saving ? 'Saving...' : 'Save Changes'}</button>
           </div>
         </form>
+        </div>
+        {showProductGallery && (
+          <div className="w-[380px] shrink-0 border-l border-border max-h-[90vh] overflow-y-auto bg-muted/10">
+            <ProductGalleryBody
+              products={products}
+              onPick={(product) => { addProductToItems(product); toast({ title: 'Added', description: `${product.name} added to the quotation` }); }}
+            />
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
 
-      {showProductGallery && (
-        <ProductGalleryModal
-          products={products}
-          onPick={(product) => { addProductToItems(product); toast({ title: 'Added', description: `${product.name} added to the quotation` }); }}
-          onClose={() => setShowProductGallery(false)}
-        />
-      )}
+function StatusConfirmModal({ quotation, action, onClose, onConfirm }: {
+  quotation: QuotationWithCustomer;
+  action: 'sent' | 'accepted' | 'rejected' | 'expired';
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const cfgMap: Record<'sent' | 'accepted' | 'rejected' | 'expired', { title: string; body: string; confirm: string; btn: string; icon: React.ReactNode }> = {
+    sent: {
+      title: 'Mark as Sent?',
+      body: `Quotation ${quotation.quote_number} will be marked as sent to ${quotation.customer?.name || 'the customer'}.`,
+      confirm: 'Mark as Sent',
+      btn: 'bg-green-600 hover:bg-green-700',
+      icon: <Send className="w-6 h-6 text-green-600" />,
+    },
+    accepted: {
+      title: 'Mark as Accepted?',
+      body: `Quotation ${quotation.quote_number} will be marked as accepted by the customer.`,
+      confirm: 'Mark as Accepted',
+      btn: 'bg-green-600 hover:bg-green-700',
+      icon: <CheckCircle className="w-6 h-6 text-green-600" />,
+    },
+    rejected: {
+      title: 'Mark as Rejected?',
+      body: `Quotation ${quotation.quote_number} will be marked as rejected and can no longer be converted to an invoice.`,
+      confirm: 'Mark as Rejected',
+      btn: 'bg-red-600 hover:bg-red-700',
+      icon: <Ban className="w-6 h-6 text-red-600" />,
+    },
+    expired: {
+      title: 'Mark as Expired?',
+      body: `Quotation ${quotation.quote_number} will be marked as expired and can no longer be converted to an invoice.`,
+      confirm: 'Mark as Expired',
+      btn: 'bg-orange-600 hover:bg-orange-700',
+      icon: <Clock className="w-6 h-6 text-orange-600" />,
+    },
+  };
+  const cfg = cfgMap[action];
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" style={{ zIndex: 60 }}>
+      <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+          <h2 className="text-base font-bold">{cfg.title}</h2>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6">
+          <div className="flex items-start gap-3">
+            <div className="shrink-0">{cfg.icon}</div>
+            <p className="text-sm text-muted-foreground">{cfg.body}</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border">
+          <button onClick={onClose} className="px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
+          <button onClick={onConfirm} className={`px-4 py-2 text-white rounded-lg text-sm font-semibold transition ${cfg.btn}`}>{cfg.confirm}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2719,115 +2848,6 @@ function QuickPurchaseModal({ quotation, items, products, onClose, onConfirm }: 
             </button>
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-function ProductGalleryModal({ products, onPick, onClose }: {
-  products: Product[];
-  onPick: (product: Product) => void;
-  onClose: () => void;
-}) {
-  const [search, setSearch] = useState('');
-  const [category, setCategory] = useState('');
-  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
-
-  useEffect(() => {
-    supabase.from('categories').select('id, name').eq('is_active', true).order('name')
-      .then(({ data }) => setCategories((data || []) as { id: string; name: string }[]));
-  }, []);
-
-  // Same price rule as addProductToItems so the card shows what will land
-  // on the quotation line.
-  function displayPrice(p: Product) {
-    const units = (p.units || []).filter((u: any) => u.is_active);
-    if (p.enable_multi_unit && units.length > 0) {
-      const def = getDefaultSaleUnit(p);
-      return def ? def.price : p.sale_price;
-    }
-    return p.sale_price;
-  }
-
-  function totalStock(p: Product) {
-    return (p.inventory_items || []).reduce((s, i) => s + Number(i.quantity_on_hand || 0), 0);
-  }
-
-  const filtered = products.filter(p => {
-    if (category && p.category_id !== category) return false;
-    if (search) {
-      const q = search.toLowerCase();
-      if (!p.name.toLowerCase().includes(q) && !(p.sku || '').toLowerCase().includes(q) && !(p.barcode || '').toLowerCase().includes(q)) return false;
-    }
-    return true;
-  });
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-      <div className="bg-white rounded-2xl w-full max-w-4xl shadow-2xl max-h-[90vh] flex flex-col">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <div>
-            <h2 className="text-base font-bold">Product Gallery</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">{filtered.length} product{filtered.length !== 1 ? 's' : ''} — click a product to add it to the quotation</p>
-          </div>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
-        </div>
-
-        <div className="flex items-center gap-2 px-6 py-3 border-b border-border">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search by name, SKU or barcode..."
-              className="w-full border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-            />
-          </div>
-          <select
-            value={category}
-            onChange={e => setCategory(e.target.value)}
-            className="border border-border rounded-lg px-3 py-2 text-sm focus:outline-none max-w-44"
-          >
-            <option value="">All categories</option>
-            {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-6">
-          {filtered.length === 0 ? (
-            <p className="text-center text-sm text-muted-foreground py-10">No products match your search.</p>
-          ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-              {filtered.map((p) => {
-                const stock = totalStock(p);
-                const low = Number(p.min_stock_level) > 0 && stock <= Number(p.min_stock_level);
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => onPick(p)}
-                    className="text-left border border-border rounded-xl p-2.5 hover:border-blue-300 hover:shadow-md transition"
-                  >
-                    <div className="flex items-start gap-2">
-                      <Package className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium truncate" title={p.name}>{p.name}</p>
-                        <p className="text-[10px] text-muted-foreground truncate">{p.sku || ''}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between mt-1.5 gap-1">
-                      <span className="text-sm font-semibold text-blue-600">{formatCurrency(displayPrice(p))}</span>
-                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap ${stock === 0 ? 'bg-red-100 text-red-700' : low ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>
-                        {stock === 0 ? 'Out of stock' : low ? `Low: ${stock}` : `Stock: ${stock}`}
-                      </span>
-                    </div>
-                    {p.warranty_months > 0 && <p className="text-[10px] text-muted-foreground mt-1">Warranty: {p.warranty_months} mo</p>}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );
