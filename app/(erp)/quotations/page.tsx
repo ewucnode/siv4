@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency, formatDate } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Plus, Search, Eye, EyeOff, Send, X, Trash2, FileText, ArrowRight, UserPlus, CreditCard, DollarSign, CircleCheck as CheckCircle, Printer, Share2, MessageCircle, Mail, Filter, ChevronDown, TriangleAlert as AlertTriangle, Pencil, Ban, Bell, Clock } from 'lucide-react';
+import { Plus, Search, Eye, Send, X, Trash2, FileText, ArrowRight, UserPlus, CreditCard, DollarSign, CircleCheck as CheckCircle, Printer, Share2, MessageCircle, Mail, Filter, ChevronDown, TriangleAlert as AlertTriangle, Pencil, Ban, Bell, Clock, ClipboardPaste, Copy, ShoppingCart } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import type { Quotation, QuotationStatus, Customer, Product, ProductUnit, PurchaseReminder } from '@/lib/types';
 import { loadVatSettings, computeVat, type VatSettings } from '@/lib/vat';
 import { isMultiUnitEnabled, getDefaultSaleUnit, convertToBaseUnit } from '@/lib/unit-utils';
@@ -34,6 +35,7 @@ interface QuotationWithCustomer extends Omit<Quotation, 'customer'> {
 }
 
 export default function QuotationsPage() {
+  const router = useRouter();
   const [quotations, setQuotations] = useState<QuotationWithCustomer[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -417,6 +419,12 @@ export default function QuotationsPage() {
           onEdit={() => openEditModal(viewingQuotation)}
           onDelete={() => setDeletingQuotation(viewingQuotation)}
           companySettings={companySettings}
+          products={products}
+          onQuickPurchase={(payload) => {
+            sessionStorage.setItem('quickPurchaseItems', JSON.stringify(payload));
+            setViewingQuotation(null);
+            router.push('/purchases');
+          }}
         />
       )}
 
@@ -709,6 +717,83 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
     }, ...prev]);
   }
 
+  // Paste a product list copied from an invoice or another quotation
+  // (shared 'invoice-product-list' clipboard format). Quotations warn on
+  // out-of-stock instead of blocking, so quantities are not capped here.
+  async function pasteProductList() {
+    try {
+      const raw = await navigator.clipboard.readText();
+      const parsed = JSON.parse(raw);
+      if (parsed?.type !== 'invoice-product-list' || !Array.isArray(parsed.items)) throw new Error('invalid');
+
+      const missingIds = parsed.items
+        .map((r: any) => r.product_id)
+        .filter((id: string) => id && !products.find((p: any) => p.id === id));
+
+      let extraProducts: any[] = [];
+      if (missingIds.length) {
+        const { data: fetched } = await supabase
+          .from('products')
+          .select(`*, units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order), inventory_items(id, warehouse_id, quantity_on_hand)`)
+          .in('id', missingIds);
+        extraProducts = fetched || [];
+      }
+      const allProducts = [...products, ...extraProducts];
+
+      let notFoundCount = 0;
+      const pastedItems = parsed.items.map((row: any) => {
+        const product: any = allProducts.find((p: any) => p.id === row.product_id);
+        if (!product) { notFoundCount++; return null; }
+        const availableUnits = product.enable_multi_unit && product.units
+          ? product.units.filter((u: ProductUnit) => u.is_active)
+          : [];
+        const selectedUnit = availableUnits.find((u: ProductUnit) => u.unit_name === row.unit_name) || (availableUnits.length ? getDefaultSaleUnit(product) : undefined);
+        const invItems: any[] = product.inventory_items || [];
+        const availableWhs = invItems
+          .filter((i: any) => Number(i.quantity_on_hand) > 0)
+          .map((i: any) => ({
+            warehouse_id: i.warehouse_id,
+            warehouse_name: warehouses.find(w => w.id === i.warehouse_id)?.name || i.warehouse_id,
+            stock: Number(i.quantity_on_hand),
+            inventory_item_id: i.id,
+          }));
+        const warehouse = availableWhs.find(w => w.warehouse_id === row.warehouse_id) || (availableWhs.length > 0 ? availableWhs.reduce((a, b) => a.stock > b.stock ? a : b) : null);
+        const stock = warehouse ? warehouse.stock : (invItems.length > 0 ? 0 : null);
+        const quantity = Math.max(1, Number(row.quantity) || 1);
+        const baseQuantity = selectedUnit ? convertToBaseUnit(quantity, selectedUnit) : quantity;
+        const costPrice = selectedUnit ? (selectedUnit.cost_price || product.cost_price || 0) : (product.cost_price || 0);
+        return {
+          product_id: product.id, product_name: product.name, product_sku: product.sku,
+          product_unit: product.unit, product_base_unit: product.base_unit, stock_qty: stock,
+          quantity, unit_price: Number(row.unit_price) || (selectedUnit?.price || product.sale_price || 0),
+          discount_percent: Math.min(100, Math.max(0, Number(row.discount_percent) || 0)),
+          selected_unit: selectedUnit, available_units: availableUnits.length ? availableUnits : undefined,
+          base_quantity: baseQuantity, cost_price: costPrice,
+          warehouse_id: warehouse?.warehouse_id, available_warehouses: availableWhs,
+        };
+      }).filter(Boolean);
+
+      if (!pastedItems.length) {
+        if (notFoundCount > 0) {
+          setError(`${notFoundCount} product${notFoundCount === 1 ? '' : 's'} from the copied list were not found in your current product list. They may have been deleted or deactivated.`);
+        } else {
+          setError('No matching products were found in the copied list.');
+        }
+        return;
+      }
+      setItems(prev => [...(pastedItems as any[]), ...prev]);
+      setError('');
+      const desc = `${pastedItems.length} product${pastedItems.length === 1 ? '' : 's'} added to the quotation`;
+      if (notFoundCount > 0) {
+        toast({ title: 'Pasted', description: `${desc}. ${notFoundCount} product${notFoundCount === 1 ? '' : 's'} could not be found and were skipped.` });
+      } else {
+        toast({ title: 'Pasted', description: desc });
+      }
+    } catch {
+      setError('Copy a product list from an invoice or quotation first, then use Paste Products.');
+    }
+  }
+
   function updateItem(index: number, field: string, value: any) {
     const updated = [...items];
     if (field === 'warehouse_id') {
@@ -959,12 +1044,17 @@ function CreateQuotationModal({ customers: initialCustomers, products, warehouse
                 <label className="text-xs font-medium">Line Items</label>
                 {items.length > 0 && <span className="text-xs text-muted-foreground">{items.length} item{items.length !== 1 ? 's' : ''}</span>}
               </div>
-              <ProductSearchInput
-                onSelect={addProductToItems}
-                showStock
-                placeholder="Search and add products..."
-                className="mb-3"
-              />
+              <div className="flex items-center gap-2 mb-3">
+                <ProductSearchInput
+                  onSelect={addProductToItems}
+                  showStock
+                  placeholder="Search and add products..."
+                  className="flex-1"
+                />
+                <button type="button" onClick={pasteProductList} className="flex items-center gap-1.5 px-3 py-2 border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Paste products copied from an invoice or quotation">
+                  <ClipboardPaste className="w-3.5 h-3.5" />Paste Products
+                </button>
+              </div>
               {markedForPurchase.size > 0 && (
                 <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2">
                   <Bell className="w-4 h-4 text-amber-600 shrink-0" />
@@ -1407,6 +1497,83 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
     }]);
   }
 
+  // Paste a product list copied from an invoice or another quotation
+  // (shared 'invoice-product-list' clipboard format). Quotations warn on
+  // out-of-stock instead of blocking, so quantities are not capped here.
+  async function pasteProductList() {
+    try {
+      const raw = await navigator.clipboard.readText();
+      const parsed = JSON.parse(raw);
+      if (parsed?.type !== 'invoice-product-list' || !Array.isArray(parsed.items)) throw new Error('invalid');
+
+      const missingIds = parsed.items
+        .map((r: any) => r.product_id)
+        .filter((id: string) => id && !products.find((p: any) => p.id === id));
+
+      let extraProducts: any[] = [];
+      if (missingIds.length) {
+        const { data: fetched } = await supabase
+          .from('products')
+          .select(`*, units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order), inventory_items(id, warehouse_id, quantity_on_hand)`)
+          .in('id', missingIds);
+        extraProducts = fetched || [];
+      }
+      const allProducts = [...products, ...extraProducts];
+
+      let notFoundCount = 0;
+      const pastedItems = parsed.items.map((row: any) => {
+        const product: any = allProducts.find((p: any) => p.id === row.product_id);
+        if (!product) { notFoundCount++; return null; }
+        const availableUnits = product.enable_multi_unit && product.units
+          ? product.units.filter((u: ProductUnit) => u.is_active)
+          : [];
+        const selectedUnit = availableUnits.find((u: ProductUnit) => u.unit_name === row.unit_name) || (availableUnits.length ? getDefaultSaleUnit(product) : undefined);
+        const invItems: any[] = product.inventory_items || [];
+        const availableWhs = invItems
+          .filter((i: any) => Number(i.quantity_on_hand) > 0)
+          .map((i: any) => ({
+            warehouse_id: i.warehouse_id,
+            warehouse_name: warehouses.find(w => w.id === i.warehouse_id)?.name || i.warehouse_id,
+            stock: Number(i.quantity_on_hand),
+            inventory_item_id: i.id,
+          }));
+        const warehouse = availableWhs.find(w => w.warehouse_id === row.warehouse_id) || (availableWhs.length > 0 ? availableWhs.reduce((a, b) => a.stock > b.stock ? a : b) : null);
+        const stock = invItems.length > 0 ? invItems.reduce((s: number, i: any) => s + Number(i.quantity_on_hand), 0) : null;
+        const quantity = Math.max(1, Number(row.quantity) || 1);
+        const baseQuantity = selectedUnit ? convertToBaseUnit(quantity, selectedUnit) : quantity;
+        const costPrice = selectedUnit ? (selectedUnit.cost_price || product.cost_price || 0) : (product.cost_price || 0);
+        return {
+          product_id: product.id, product_name: product.name, product_sku: product.sku,
+          product_unit: product.unit, product_base_unit: product.base_unit, stock_qty: stock,
+          quantity, unit_price: Number(row.unit_price) || (selectedUnit?.price || product.sale_price || 0),
+          discount_percent: Math.min(100, Math.max(0, Number(row.discount_percent) || 0)),
+          selected_unit: selectedUnit, available_units: availableUnits.length ? availableUnits : undefined,
+          base_quantity: baseQuantity, cost_price: costPrice,
+          warehouse_id: warehouse?.warehouse_id, available_warehouses: availableWhs,
+        };
+      }).filter(Boolean);
+
+      if (!pastedItems.length) {
+        if (notFoundCount > 0) {
+          setError(`${notFoundCount} product${notFoundCount === 1 ? '' : 's'} from the copied list were not found in your current product list. They may have been deleted or deactivated.`);
+        } else {
+          setError('No matching products were found in the copied list.');
+        }
+        return;
+      }
+      setItems(prev => [...prev, ...(pastedItems as any[])]);
+      setError('');
+      const desc = `${pastedItems.length} product${pastedItems.length === 1 ? '' : 's'} added to the quotation`;
+      if (notFoundCount > 0) {
+        toast({ title: 'Pasted', description: `${desc}. ${notFoundCount} product${notFoundCount === 1 ? '' : 's'} could not be found and were skipped.` });
+      } else {
+        toast({ title: 'Pasted', description: desc });
+      }
+    } catch {
+      setError('Copy a product list from an invoice or quotation first, then use Paste Products.');
+    }
+  }
+
   function updateItem(index: number, field: string, value: any) {
     const updated = [...items];
     if (field === 'selected_unit') {
@@ -1596,12 +1763,17 @@ function EditQuotationModal({ quotation, customers, products, warehouses, onClos
               <label className="text-xs font-medium">Line Items</label>
               {items.length > 0 && <span className="text-xs text-muted-foreground">{items.length} item{items.length !== 1 ? 's' : ''}</span>}
             </div>
-            <ProductSearchInput
-              onSelect={addProductToItems}
-              showStock
-              placeholder="Search and add products..."
-              className="mb-3"
-            />
+            <div className="flex items-center gap-2 mb-3">
+              <ProductSearchInput
+                onSelect={addProductToItems}
+                showStock
+                placeholder="Search and add products..."
+                className="flex-1"
+              />
+              <button type="button" onClick={pasteProductList} className="flex items-center gap-1.5 px-3 py-2 border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg text-xs font-semibold transition whitespace-nowrap" title="Paste products copied from an invoice or quotation">
+                <ClipboardPaste className="w-3.5 h-3.5" />Paste Products
+              </button>
+            </div>
             {markedForPurchase.size > 0 && (
               <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2">
                 <Bell className="w-4 h-4 text-amber-600 shrink-0" />
@@ -2078,7 +2250,7 @@ function ConvertToInvoiceModal({ quotation, onClose, onConverted }: {
   );
 }
 
-function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDelete, companySettings }: {
+function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDelete, companySettings, products, onQuickPurchase }: {
   quotation: QuotationWithCustomer;
   items: any[];
   onClose: () => void;
@@ -2086,15 +2258,36 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDe
   onEdit: () => void;
   onDelete: () => void;
   companySettings: any;
+  products: Product[];
+  onQuickPurchase: (payload: any) => void;
 }) {
   const cfg = statusConfig[quotation.status as QuotationStatus] || statusConfig.draft;
   const canEdit = quotation.status === 'draft' || quotation.status === 'sent';
   const printRef = useRef<HTMLDivElement>(null);
   const [hideDiscountPercent, setHideDiscountPercent] = useState(false);
   const [hideRate, setHideRate] = useState(false);
+  const [hideItemDiscount, setHideItemDiscount] = useState(false);
+  const [printOptionsOpen, setPrintOptionsOpen] = useState(false);
+  const [showQuickPurchase, setShowQuickPurchase] = useState(false);
   // VAT rate for the printed quotation's tax row label.
   const [vatSettings, setVatSettings] = useState<VatSettings>({ enabled: false, rate: 15, mode: 'exclusive', default_on: true });
   useEffect(() => { loadVatSettings(supabase).then(setVatSettings); }, []);
+
+  function copyProductList() {
+    const text = JSON.stringify({ type: 'invoice-product-list', items: items.map((item: any) => ({
+      product_id: item.product_id,
+      quantity: Number(item.quantity),
+      unit_price: Number(item.unit_price),
+      discount_percent: Number(item.discount_percent || 0),
+      unit_name: item.unit_name || item.product?.unit || null,
+      warehouse_id: item.warehouse_id || null,
+    }))});
+    navigator.clipboard?.writeText(text).then(() => {
+      toast({ title: 'Copied', description: `${items.length} product${items.length === 1 ? '' : 's'} copied` });
+    }).catch(() => {
+      toast({ title: 'Copy failed', description: 'Your browser blocked clipboard access.', variant: 'destructive' });
+    });
+  }
 
   function buildShareText() {
     const lines = [
@@ -2132,9 +2325,14 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDe
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="print-modal bg-white rounded-2xl w-full max-w-3xl shadow-2xl max-h-[90vh] overflow-y-auto">
-        <div className="no-print flex items-center justify-between px-6 py-3 border-b border-border sticky top-0 bg-white z-10">
-          <span className="text-sm font-semibold text-muted-foreground">Quotation Preview</span>
-          <div className="flex items-center gap-2">
+        <div className="no-print sticky top-0 bg-white z-10">
+          {/* Bar 1: title + close */}
+          <div className="flex items-center justify-between px-6 py-3 border-b border-border">
+            <span className="text-sm font-semibold text-muted-foreground">Quotation Preview</span>
+            <button onClick={onClose} className="text-muted-foreground hover:text-foreground p-1"><X className="w-5 h-5" /></button>
+          </div>
+          {/* Bar 2: action buttons */}
+          <div className="flex flex-wrap items-center justify-end gap-2 px-6 py-2.5 border-b border-border bg-muted/20">
             {canEdit && (
               <button onClick={onEdit} className="flex items-center gap-1.5 px-3 py-1.5 border border-border rounded-lg text-sm font-medium hover:bg-blue-50 hover:text-blue-600 transition">
                 <Pencil className="w-3.5 h-3.5" />Edit
@@ -2154,23 +2352,60 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDe
             <button onClick={() => printNode(printRef.current)} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-sm font-medium transition">
               <Printer className="w-3.5 h-3.5" />Print
             </button>
-            <button
-              onClick={() => setHideDiscountPercent(v => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition ${hideDiscountPercent ? 'bg-amber-100 text-amber-700 border border-amber-300' : 'bg-muted/40 text-muted-foreground hover:bg-muted/60'}`}
-              title="Toggle discount percentage visibility on print"
-            >
-              {hideDiscountPercent ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              {hideDiscountPercent ? 'Disc% Hidden' : 'Disc% Visible'}
+            <button onClick={copyProductList} className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition" title="Copy this quotation's product list">
+              <Copy className="w-3.5 h-3.5" />Copy Products
             </button>
-            <button
-              onClick={() => setHideRate(v => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition ${hideRate ? 'bg-amber-100 text-amber-700 border border-amber-300' : 'bg-muted/40 text-muted-foreground hover:bg-muted/60'}`}
-              title="Toggle unit rate visibility on print"
-            >
-              {hideRate ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              {hideRate ? 'Rate Hidden' : 'Rate Visible'}
-            </button>
-            <button onClick={onClose} className="text-muted-foreground hover:text-foreground p-1"><X className="w-5 h-5" /></button>
+            {quotation.status !== 'converted' && (
+              <button onClick={() => setShowQuickPurchase(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition" title="Create a purchase order for low-stock items in this quotation">
+                <ShoppingCart className="w-3.5 h-3.5" />Quick Purchase
+              </button>
+            )}
+            <div className="relative">
+              <button
+                onClick={() => setPrintOptionsOpen(v => !v)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-muted/40 text-muted-foreground hover:bg-muted/60 transition"
+              >
+                <ChevronDown className="w-4 h-4" />
+                Print Options
+              </button>
+              {printOptionsOpen && (
+                <div className="absolute right-0 mt-2 w-64 bg-white border border-border rounded-lg shadow-lg p-2 z-50">
+                  <button
+                    onClick={() => setHideRate(v => !v)}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm hover:bg-muted transition"
+                  >
+                    <span>Rate Column</span>
+                    {hideRate ? (
+                      <span className="text-amber-700 font-medium">Hidden</span>
+                    ) : (
+                      <span className="text-green-700 font-medium">Visible</span>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setHideDiscountPercent(v => !v)}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm hover:bg-muted transition"
+                  >
+                    <span>Discount % Column</span>
+                    {hideDiscountPercent ? (
+                      <span className="text-amber-700 font-medium">Hidden</span>
+                    ) : (
+                      <span className="text-green-700 font-medium">Visible</span>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setHideItemDiscount(v => !v)}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm hover:bg-muted transition"
+                  >
+                    <span>Item Discount (under subtotal)</span>
+                    {hideItemDiscount ? (
+                      <span className="text-amber-700 font-medium">Hidden</span>
+                    ) : (
+                      <span className="text-green-700 font-medium">Visible</span>
+                    )}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -2213,6 +2448,8 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDe
             shippingAmount={Number((quotation as any).shipping_cost) || 0}
             hideDiscountPercent={hideDiscountPercent}
             hideRate={hideRate}
+            hideItemDiscount={hideItemDiscount}
+            recalculatedSubtotal={items.reduce((sum: number, item: any) => sum + (Number(item.subtotal) || 0), 0)}
             totalAmount={Number(quotation.total_amount)}
             notes={(quotation as any).notes}
             reference={(quotation as any).reference}
@@ -2223,6 +2460,238 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDe
           <div className="no-print flex items-center justify-end px-8 py-4 border-t border-border">
             <button onClick={onConvert} className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-semibold transition">
               <FileText className="w-4 h-4" />Convert to Invoice
+            </button>
+          </div>
+        )}
+
+        {showQuickPurchase && (
+          <QuickPurchaseModal
+            quotation={quotation}
+            items={items}
+            products={products}
+            onClose={() => setShowQuickPurchase(false)}
+            onConfirm={(payload) => {
+              setShowQuickPurchase(false);
+              onQuickPurchase(payload);
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function QuickPurchaseModal({ quotation, items, products, onClose, onConfirm }: {
+  quotation: QuotationWithCustomer;
+  items: any[];
+  products: Product[];
+  onClose: () => void;
+  onConfirm: (payload: any) => void;
+}) {
+  interface Row {
+    product_id: string;
+    product_name: string;
+    product_sku: string;
+    unit_name: string | null;
+    warehouse_id: string | null;
+    conversion_factor: number;
+    quoted_qty: number;
+    stock: number;
+    min_stock: number;
+    shortfall: boolean;
+    belowReorder: boolean;
+    purchaseQty: number;
+    selected: boolean;
+  }
+
+  const [includeLowStock, setIncludeLowStock] = useState(false);
+  const [supplierId, setSupplierId] = useState('');
+  const [suppliersList, setSuppliersList] = useState<{ id: string; name: string }[]>([]);
+  const [rows, setRows] = useState<Row[]>([]);
+
+  useEffect(() => {
+    supabase.from('suppliers').select('id, name').eq('is_active', true).order('name')
+      .then(({ data }) => setSuppliersList((data || []) as { id: string; name: string }[]));
+  }, []);
+
+  useEffect(() => {
+    const computed = items.map((item: any) => {
+      const product: any = products.find((p: any) => p.id === item.product_id);
+      if (!product) return null;
+      const invItems: any[] = product.inventory_items || [];
+      // Stock at the quotation line's warehouse (fall back to total on hand).
+      const stock = item.warehouse_id
+        ? invItems.filter((i: any) => i.warehouse_id === item.warehouse_id).reduce((s: number, i: any) => s + Number(i.quantity_on_hand || 0), 0)
+        : invItems.reduce((s: number, i: any) => s + Number(i.quantity_on_hand || 0), 0);
+      // Quotation quantities are stored on the item's unit scale; stock is
+      // in base units. unit_conversion_factor converts one quoted unit to base.
+      const factor = Number(item.unit_conversion_factor) || 1;
+      const quotedBase = Number(item.quantity) * factor;
+      const minStock = Number((product as any).min_stock_level) || 0;
+      const shortfall = quotedBase > stock;
+      const belowReorder = minStock > 0 && stock <= minStock;
+      const suggestedBase = shortfall
+        ? quotedBase - stock
+        : (belowReorder ? minStock - stock : 0);
+      if (suggestedBase <= 0) return null;
+      return {
+        product_id: item.product_id,
+        product_name: product.name,
+        product_sku: product.sku,
+        unit_name: item.unit_name || product.unit || null,
+        warehouse_id: item.warehouse_id || null,
+        conversion_factor: factor,
+        quoted_qty: Number(item.quantity),
+        stock,
+        min_stock: minStock,
+        shortfall,
+        belowReorder,
+        purchaseQty: Math.max(1, factor > 1 ? Math.ceil(suggestedBase / factor) : suggestedBase),
+        selected: shortfall,
+      } as Row;
+    }).filter(Boolean) as Row[];
+    setRows(computed);
+  }, [items, products]);
+
+  const visible = rows.filter(r => r.shortfall || (includeLowStock && r.belowReorder));
+  const selectedCount = visible.filter(r => r.selected).length;
+
+  function confirm() {
+    const selected = visible.filter(r => r.selected);
+    if (!selected.length) return;
+    onConfirm({
+      items: selected.map(r => ({
+        product_id: r.product_id,
+        quantity: r.purchaseQty,
+        unit_name: r.unit_name,
+        warehouse_id: r.warehouse_id,
+      })),
+      supplier_id: supplierId || null,
+      source: quotation.quote_number,
+    });
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
+      <div className="bg-white rounded-2xl w-full max-w-3xl shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white z-10">
+          <div>
+            <h2 className="text-base font-bold">Quick Purchase</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">Suggested from quotation {quotation.quote_number} — review and confirm to create a purchase order</p>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          {visible.length === 0 ? (
+            <div className="text-center py-10">
+              <CheckCircle className="w-10 h-10 text-green-600 mx-auto mb-2" />
+              <p className="text-sm font-medium">Nothing to purchase</p>
+              <p className="text-xs text-muted-foreground mt-1">All products on this quotation are sufficiently stocked.</p>
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto border border-border rounded-lg">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/40">
+                    <tr>
+                      <th className="w-10 px-3 py-2"></th>
+                      <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Product</th>
+                      <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2 w-20">Quoted</th>
+                      <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2 w-24">In Stock</th>
+                      <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2 w-32">Purchase Qty</th>
+                      <th className="text-center text-xs font-semibold text-muted-foreground px-3 py-2 w-24">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map(row => {
+                      const rowIndex = rows.indexOf(row);
+                      return (
+                        <tr key={row.product_id} className={`border-t border-border ${row.selected ? 'bg-blue-50/40' : ''}`}>
+                          <td className="px-3 py-2">
+                            <input
+                              type="checkbox"
+                              checked={row.selected}
+                              onChange={() => {
+                                const updated = [...rows];
+                                updated[rowIndex] = { ...row, selected: !row.selected };
+                                setRows(updated);
+                              }}
+                              className="accent-blue-600"
+                            />
+                          </td>
+                          <td className="px-3 py-2">
+                            <p className="font-medium">{row.product_name}</p>
+                            {row.product_sku && <p className="text-[10px] text-muted-foreground">{row.product_sku}</p>}
+                          </td>
+                          <td className="text-right px-3 py-2">{row.quoted_qty} {row.unit_name || ''}</td>
+                          <td className={`text-right px-3 py-2 ${row.shortfall ? 'text-red-600 font-semibold' : ''}`}>{row.stock}</td>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center gap-1 justify-end">
+                              <input
+                                type="number"
+                                min={1}
+                                value={row.purchaseQty}
+                                onChange={(e) => {
+                                  const updated = [...rows];
+                                  updated[rowIndex] = { ...row, purchaseQty: Math.max(1, parseInt(e.target.value) || 1) };
+                                  setRows(updated);
+                                }}
+                                className="w-20 border border-border rounded-md px-2 py-1 text-right text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                              />
+                              {row.unit_name && <span className="text-xs text-muted-foreground">{row.unit_name}</span>}
+                            </div>
+                          </td>
+                          <td className="text-center px-3 py-2">
+                            {row.shortfall ? (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">Shortfall</span>
+                            ) : (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">Low stock</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeLowStock}
+                  onChange={e => setIncludeLowStock(e.target.checked)}
+                  className="accent-blue-600"
+                />
+                Also include quotation items below their reorder level
+              </label>
+
+              <div>
+                <label className="block text-xs font-medium mb-1">Supplier (optional — can be chosen on the purchase order)</label>
+                <select
+                  value={supplierId}
+                  onChange={e => setSupplierId(e.target.value)}
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none"
+                >
+                  <option value="">— Choose later on the purchase order —</option>
+                  {suppliersList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+            </>
+          )}
+        </div>
+
+        {visible.length > 0 && (
+          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border sticky bottom-0 bg-white">
+            <button type="button" onClick={onClose} className="px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
+            <button
+              type="button"
+              onClick={confirm}
+              disabled={selectedCount === 0}
+              className="flex items-center gap-2 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-60"
+            >
+              <ShoppingCart className="w-4 h-4" />
+              Create Purchase Order ({selectedCount} item{selectedCount === 1 ? '' : 's'})
             </button>
           </div>
         )}
