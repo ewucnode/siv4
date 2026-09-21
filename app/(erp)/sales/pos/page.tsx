@@ -35,6 +35,7 @@ import type { LedgerStock } from '@/lib/oversell-gate';
 import PrintTemplate from '@/components/PrintTemplate';
 import { printNode } from '@/lib/print';
 import { QuickSellModal } from '@/components/quick-sell-modal';
+import { tokenizeSearch, applyIlikeTokens, matchesTokens } from '@/lib/search';
 
 // Snapshot of a completed charge, taken before the cart resets, so the
 // receipt can be printed afterwards — online with the real number, offline
@@ -113,7 +114,16 @@ interface ProductData {
   // Non-stock (quick-sell) products bypass the oversell gate and all FIFO
   // handling — see lib/oversell-gate.ts and the 20260914100000 migration.
   track_inventory?: boolean;
+  barcode?: string;
 }
+
+/**
+ * POS search: sanitised, order-independent, barcode-aware. The shared helpers
+ * live in lib/search.ts — see .agents/skills/search-feature-robustness for
+ * why each rule exists (the grammar injection that used to void the whole
+ * search, missing barcode matching, and the response race).
+ */
+const POS_SEARCH_COLUMNS = ['name', 'sku', 'barcode'];
 
 const WALK_IN_CUSTOMER_ID = '00000000-0000-0000-0000-000000000001';
 
@@ -185,6 +195,8 @@ export default function POSPage() {
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
   const [reference, setReference] = useState('');
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonic sequence for product searches — drops out-of-order responses.
+  const searchSeqRef = useRef(0);
   const { items: globalCartItems, clearCart: clearGlobalCart } = useGlobalCart();
   const globalCartConsumed = useRef(false);
   const [warehouses, setWarehouses] = useState<{ id: string; name: string; code: string; is_default: boolean }[]>([]);
@@ -420,16 +432,20 @@ export default function POSPage() {
     void cachedQuery<ProductData[]>(CACHE_KEYS.products, PRODUCT_SNAPSHOT_TTL, () =>
       fetchAll(() => supabase
         .from('products')
-        .select(`id, name, sku, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit, brand_id, category_id,
+        .select(`id, name, sku, barcode, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit, track_inventory, brand_id, category_id,
           inventory_items(id, warehouse_id, quantity_on_hand),
           units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order)`)
         .eq('is_active', true)
-        .order('name')))
+        .order('name').order('id')))
       .catch(() => {});
   }
 
   async function loadProducts(q: string) {
     setLoading(true);
+    // Out-of-order guard: a slow response for an older query must not
+    // overwrite the results of a newer one while the user keeps typing.
+    const seq = ++searchSeqRef.current;
+    const tokens = tokenizeSearch(q);
 
     // Offline: serve the encrypted local snapshot, applying the same
     // search/brand/category filters client-side.
@@ -445,17 +461,15 @@ export default function POSPage() {
         }
       }
       if (cached && cached.length > 0) {
-        let list = cached;
-        if (q.trim()) {
-          const needle = q.trim().toLowerCase();
-          list = list.filter(p => (p.name || '').toLowerCase().includes(needle) || (p.sku || '').toLowerCase().includes(needle));
-        }
+        // Same search semantics as the online path: sanitized tokens AND-ed
+        // across name, SKU and barcode.
+        let list = cached.filter(p => matchesTokens(p, POS_SEARCH_COLUMNS, tokens));
         if (selectedBrand) list = list.filter(p => (p as any).brand_id === selectedBrand);
         if (selectedCategory) list = list.filter(p => (p as any).category_id === selectedCategory);
         // Quick-sell (non-stock) items never enter the POS grid; snapshots
         // from before the flag existed simply lack the field.
         list = list.filter(p => (p as any).track_inventory !== false);
-        setProducts(list.slice(0, 60));
+        if (seq === searchSeqRef.current) setProducts(list.slice(0, 60));
       } else {
         setProducts([]);
         toast({
@@ -470,16 +484,17 @@ export default function POSPage() {
 
     let query = supabase
       .from('products')
-      .select(`id, name, sku, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit, track_inventory,
+      .select(`id, name, sku, barcode, sale_price, cost_price, image_url, unit, base_unit, enable_multi_unit, track_inventory,
         inventory_items(id, warehouse_id, quantity_on_hand),
         units:product_units(id, product_id, unit_name, unit_short, conversion_factor, is_base_unit, is_sale_unit, price, cost_price, is_active, sort_order)`, { count: 'exact' })
       .eq('is_active', true)
       .eq('track_inventory', true)  // POS grid is stocked-only; quick-sell items use the ⚡ form
       .order('name');
 
-    if (q.trim()) {
-      query = query.or(`name.ilike.%${q.trim()}%,sku.ilike.%${q.trim()}%`);
-    }
+    // One sanitized `.or()` per token (AND-ed by PostgREST across calls), each
+    // matching name, SKU or barcode — so terms with commas/parentheses can't
+    // break the filter and word order doesn't matter.
+    query = applyIlikeTokens(query, POS_SEARCH_COLUMNS, tokens);
     if (selectedBrand) {
       query = query.eq('brand_id', selectedBrand);
     }
@@ -502,17 +517,15 @@ export default function POSPage() {
         }
       }
       if (cached && cached.length > 0) {
-        let list = cached;
-        if (q.trim()) {
-          const needle = q.trim().toLowerCase();
-          list = list.filter(p => (p.name || '').toLowerCase().includes(needle) || (p.sku || '').toLowerCase().includes(needle));
-        }
+        // Same search semantics as the online path: sanitized tokens AND-ed
+        // across name, SKU and barcode.
+        let list = cached.filter(p => matchesTokens(p, POS_SEARCH_COLUMNS, tokens));
         if (selectedBrand) list = list.filter(p => (p as any).brand_id === selectedBrand);
         if (selectedCategory) list = list.filter(p => (p as any).category_id === selectedCategory);
         // Quick-sell (non-stock) items never enter the POS grid; snapshots
         // from before the flag existed simply lack the field.
         list = list.filter(p => (p as any).track_inventory !== false);
-        setProducts(list.slice(0, 60));
+        if (seq === searchSeqRef.current) setProducts(list.slice(0, 60));
       } else {
         setProducts([]);
         toast({
@@ -525,7 +538,7 @@ export default function POSPage() {
       return;
     }
 
-    setProducts((data || []) as ProductData[]);
+    if (seq === searchSeqRef.current) setProducts((data || []) as ProductData[]);
     // Keep the offline snapshot warm (no-op while fresh).
     void refreshProductSnapshot();
     setLoading(false);
@@ -1452,7 +1465,7 @@ export default function POSPage() {
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Search products by name or SKU..."
+              placeholder="Search products by name, SKU or barcode..."
               className="w-full pl-10 pr-4 py-2.5 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 bg-white"
             />
           </div>
