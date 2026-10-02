@@ -6,10 +6,17 @@
  * invoice items, payments, returns, employees, attendance and the reference
  * tables. Refresh strategy is a full replace per table — the app uses soft
  * deletes, so a full refresh is the only strategy that also removes rows
- * deleted server-side without a changelog.
+ * deleted server-side without a changelog. Tables with a `delta` fetch
+ * (currently stock_movements, activity_logs, cost_price_history by
+ * created_at; products, invoices, invoice_items, payments, inventory_items
+ * by the trigger-maintained updated_at) only download rows changed since the
+ * last refresh, guarded by a zero-payload count probe that falls back to a
+ * full replace when rows disappear server-side; a full replace also runs
+ * once a day as a convergence net.
  *
- * Triggers: app start (after login), every 15 minutes while online, and the
- * moment connectivity returns. Rows are sealed per-record with the user's
+ * Triggers: app start (after login), hourly while the tab is visible and
+ * online (plus the moment connectivity returns or a hidden tab regains
+ * visibility), and after every applied outbox change. Rows are sealed per-record with the user's
  * AES-GCM key, so the local database is encrypted at rest exactly like the
  * page caches and the outbox.
  *
@@ -26,7 +33,13 @@ import { networkMonitor } from './network'
 import { isNetworkError } from './cache'
 import { resolveUserId } from './session'
 
-export const REPLICA_INTERVAL_MS = 15 * 60_000
+/**
+ * Periodic full-refresh interval. Kept at one hour because it is the
+ * background safety net only — active use refreshes the replica after every
+ * applied outbox change (lib/offline/sync.ts), and a hidden tab skips ticks
+ * entirely.
+ */
+export const REPLICA_INTERVAL_MS = 60 * 60_000
 
 /**
  * A completed full sync newer than this makes further (non-forced) runs skip.
@@ -37,6 +50,14 @@ export const REPLICA_INTERVAL_MS = 15 * 60_000
  */
 const REPLICA_MIN_INTERVAL_MS = 60_000
 
+/**
+ * Delta-replicated replica tables fall back to a full refresh at least this
+ * often, so changes a timestamp cursor cannot see (server-side removals by
+ * data-repair migrations, or delete+reinsert edits that keep the total
+ * count) eventually converge out of the local copy.
+ */
+const REPLICA_FULL_REFRESH_MS = 24 * 60 * 60_000
+
 export interface ReplicaTableSpec {
   /** human name shown in the Sync Center */
   name: string
@@ -46,16 +67,31 @@ export interface ReplicaTableSpec {
   store: string
   /** full-table fetch, paginated past the 1000-row cap, deterministically ordered */
   fetch: () => Promise<Array<Record<string, any> & { id: string | number }>>
+  /**
+   * Incremental fetch for tables the replica can track by timestamp: only
+   * rows with the cursor column strictly after the given ISO timestamp
+   * (the newest value the replica has already stored), in (cursor column,
+   * id) order. When present, replicateAll appends/updates between full
+   * refreshes instead of re-downloading the whole table.
+   */
+  delta?: (afterCursor: string) => Promise<Array<Record<string, any> & { id: string | number }>>
+  /**
+   * Timestamp column the delta cursor tracks — 'created_at' for insert-only
+   * tables, 'updated_at' (maintained by the touch_updated_at trigger,
+   * migration 20261002150000) for tables whose rows can be edited. Defaults
+   * to 'created_at'.
+   */
+  cursorColumn?: 'created_at' | 'updated_at'
 }
 
 export const REPLICA_TABLES: ReplicaTableSpec[] = [
-  { name: 'Products', table: 'products', store: 'replica_products', fetch: () => fetchAll(() => supabaseRaw.from('products').select('*').order('id')) },
-  { name: 'Stock counters', table: 'inventory_items', store: 'replica_inventory_items', fetch: () => fetchAll(() => supabaseRaw.from('inventory_items').select('*').order('id')) },
+  { name: 'Products', table: 'products', store: 'replica_products', fetch: () => fetchAll(() => supabaseRaw.from('products').select('*').order('id')), cursorColumn: 'updated_at', delta: (afterCursor) => fetchAll(() => supabaseRaw.from('products').select('*').gt('updated_at', afterCursor).order('updated_at').order('id')) },
+  { name: 'Stock counters', table: 'inventory_items', store: 'replica_inventory_items', fetch: () => fetchAll(() => supabaseRaw.from('inventory_items').select('*').order('id')), cursorColumn: 'updated_at', delta: (afterCursor) => fetchAll(() => supabaseRaw.from('inventory_items').select('*').gt('updated_at', afterCursor).order('updated_at').order('id')) },
   { name: 'Product units', table: 'product_units', store: 'replica_product_units', fetch: () => fetchAll(() => supabaseRaw.from('product_units').select('*').order('id')) },
   { name: 'Customers', table: 'customers', store: 'replica_customers', fetch: () => fetchAll(() => supabaseRaw.from('customers').select('*').order('id')) },
-  { name: 'Invoices', table: 'invoices', store: 'replica_invoices', fetch: () => fetchAll(() => supabaseRaw.from('invoices').select('*').order('id')) },
-  { name: 'Invoice items', table: 'invoice_items', store: 'replica_invoice_items', fetch: () => fetchAll(() => supabaseRaw.from('invoice_items').select('*').order('id')) },
-  { name: 'Payments', table: 'payments', store: 'replica_payments', fetch: () => fetchAll(() => supabaseRaw.from('payments').select('*').order('id')) },
+  { name: 'Invoices', table: 'invoices', store: 'replica_invoices', fetch: () => fetchAll(() => supabaseRaw.from('invoices').select('*').order('id')), cursorColumn: 'updated_at', delta: (afterCursor) => fetchAll(() => supabaseRaw.from('invoices').select('*').gt('updated_at', afterCursor).order('updated_at').order('id')) },
+  { name: 'Invoice items', table: 'invoice_items', store: 'replica_invoice_items', fetch: () => fetchAll(() => supabaseRaw.from('invoice_items').select('*').order('id')), cursorColumn: 'updated_at', delta: (afterCursor) => fetchAll(() => supabaseRaw.from('invoice_items').select('*').gt('updated_at', afterCursor).order('updated_at').order('id')) },
+  { name: 'Payments', table: 'payments', store: 'replica_payments', fetch: () => fetchAll(() => supabaseRaw.from('payments').select('*').order('id')), cursorColumn: 'updated_at', delta: (afterCursor) => fetchAll(() => supabaseRaw.from('payments').select('*').gt('updated_at', afterCursor).order('updated_at').order('id')) },
   { name: 'Sales returns', table: 'sales_returns', store: 'replica_sales_returns', fetch: () => fetchAll(() => supabaseRaw.from('sales_returns').select('*').order('id')) },
   { name: 'Sales return items', table: 'sales_return_items', store: 'replica_sales_return_items', fetch: () => fetchAll(() => supabaseRaw.from('sales_return_items').select('*').order('id')) },
   { name: 'Employees', table: 'employees', store: 'replica_employees', fetch: () => fetchAll(() => supabaseRaw.from('employees').select('*').order('id')) },
@@ -77,7 +113,7 @@ export const REPLICA_TABLES: ReplicaTableSpec[] = [
   { name: 'Accounts', table: 'accounts', store: 'replica_accounts', fetch: () => fetchAll(() => supabaseRaw.from('accounts').select('*').order('id')) },
   { name: 'Journal entries', table: 'journal_entries', store: 'replica_journal_entries', fetch: () => fetchAll(() => supabaseRaw.from('journal_entries').select('*').order('id')) },
   { name: 'Journal lines', table: 'journal_lines', store: 'replica_journal_lines', fetch: () => fetchAll(() => supabaseRaw.from('journal_lines').select('*').order('id')) },
-  { name: 'Stock movements', table: 'stock_movements', store: 'replica_stock_movements', fetch: () => fetchAll(() => supabaseRaw.from('stock_movements').select('*').order('id')) },
+  { name: 'Stock movements', table: 'stock_movements', store: 'replica_stock_movements', fetch: () => fetchAll(() => supabaseRaw.from('stock_movements').select('*').order('id')), delta: (afterCursor) => fetchAll(() => supabaseRaw.from('stock_movements').select('*').gt('created_at', afterCursor).order('created_at').order('id')) },
   { name: 'Quotations', table: 'quotations', store: 'replica_quotations', fetch: () => fetchAll(() => supabaseRaw.from('quotations').select('*').order('id')) },
   { name: 'Quotation items', table: 'quotation_items', store: 'replica_quotation_items', fetch: () => fetchAll(() => supabaseRaw.from('quotation_items').select('*').order('id')) },
   { name: 'Purchase orders', table: 'purchase_orders', store: 'replica_purchase_orders', fetch: () => fetchAll(() => supabaseRaw.from('purchase_orders').select('*').order('id')) },
@@ -93,12 +129,12 @@ export const REPLICA_TABLES: ReplicaTableSpec[] = [
   { name: 'Advance applications', table: 'customer_advance_applications', store: 'replica_customer_advance_applications', fetch: () => fetchAll(() => supabaseRaw.from('customer_advance_applications').select('*').order('id')) },
   { name: 'Customer notes', table: 'customer_notes', store: 'replica_customer_notes', fetch: () => fetchAll(() => supabaseRaw.from('customer_notes').select('*').order('id')) },
   { name: 'Store credit redemptions', table: 'store_credit_redemptions', store: 'replica_store_credit_redemptions', fetch: () => fetchAll(() => supabaseRaw.from('store_credit_redemptions').select('*').order('id')) },
-  { name: 'Cost price history', table: 'cost_price_history', store: 'replica_cost_price_history', fetch: () => fetchAll(() => supabaseRaw.from('cost_price_history').select('*').order('id')) },
+  { name: 'Cost price history', table: 'cost_price_history', store: 'replica_cost_price_history', fetch: () => fetchAll(() => supabaseRaw.from('cost_price_history').select('*').order('id')), delta: (afterCursor) => fetchAll(() => supabaseRaw.from('cost_price_history').select('*').gt('created_at', afterCursor).order('created_at').order('id')) },
   { name: 'Product sizes', table: 'product_sizes', store: 'replica_product_sizes', fetch: () => fetchAll(() => supabaseRaw.from('product_sizes').select('*').order('id')) },
   { name: 'Product colors', table: 'product_colors', store: 'replica_product_colors', fetch: () => fetchAll(() => supabaseRaw.from('product_colors').select('*').order('id')) },
   { name: 'Unit types', table: 'unit_types', store: 'replica_unit_types', fetch: () => fetchAll(() => supabaseRaw.from('unit_types').select('*').order('id')) },
   { name: 'Projects', table: 'projects', store: 'replica_projects', fetch: () => fetchAll(() => supabaseRaw.from('projects').select('*').order('id')) },
-  { name: 'Activity logs', table: 'activity_logs', store: 'replica_activity_logs', fetch: () => fetchAll(() => supabaseRaw.from('activity_logs').select('*').order('id')) },
+  { name: 'Activity logs', table: 'activity_logs', store: 'replica_activity_logs', fetch: () => fetchAll(() => supabaseRaw.from('activity_logs').select('*').order('id')), delta: (afterCursor) => fetchAll(() => supabaseRaw.from('activity_logs').select('*').gt('created_at', afterCursor).order('created_at').order('id')) },
   { name: 'Profiles', table: 'profiles', store: 'replica_profiles', fetch: () => fetchAll(() => supabaseRaw.from('profiles').select('*').order('id')) },
   { name: 'Online orders', table: 'online_orders', store: 'replica_online_orders', fetch: () => fetchAll(() => supabaseRaw.from('online_orders').select('*').order('id')) },
   { name: 'Bank reconciliation items', table: 'bank_reconciliation_items', store: 'replica_bank_reconciliation_items', fetch: () => fetchAll(() => supabaseRaw.from('bank_reconciliation_items').select('*').order('id')) },
@@ -156,20 +192,73 @@ export async function replicateAll(force = false): Promise<void> {
   try {
     const key = await getUserKey(userId)
     const db = getDB()
+    const writeTable = async (
+      spec: ReplicaTableSpec,
+      tableRows: Array<Record<string, any> & { id: string | number }>,
+      replace: boolean,
+    ) => {
+      const sealed = await Promise.all(tableRows.map(async r => ({ id: r.id, blob: await seal(key, r) })))
+      // clear + bulkPut in ONE transaction: a concurrent reader (the POS
+      // fallback, the replica query engine) sees the old rows or the new
+      // rows, never an empty store.
+      await db.transaction('rw', spec.store, async () => {
+        if (replace) await db.table(spec.store).clear()
+        if (sealed.length > 0) await db.table(spec.store).bulkPut(sealed)
+      })
+    }
     for (const spec of REPLICA_TABLES) {
       if (!networkMonitor.getState().online) return
       try {
-        const rows = await spec.fetch()
-        const sealed = await Promise.all(rows.map(async r => ({ id: r.id, blob: await seal(key, r) })))
-        // clear + bulkPut in ONE transaction: a concurrent reader (the POS
-        // fallback, the replica query engine) sees the old rows or the new
-        // rows, never an empty store.
-        await db.transaction('rw', spec.store, async () => {
-          await db.table(spec.store).clear()
-          await db.table(spec.store).bulkPut(sealed)
-        })
+        let rows: Array<Record<string, any> & { id: string | number }> = []
+        let replaceAll = true
+        let applied = false
+        if (spec.delta) {
+          const cursorKey = `replica:delta_cursor:${spec.name}`
+          const cursor = await getMeta<string>(cursorKey)
+          const lastFull = await getMeta<number>(`replica:last_full:${spec.name}`)
+          if (cursor && lastFull != null && Date.now() - lastFull < REPLICA_FULL_REFRESH_MS) {
+            const newRows = await spec.delta(cursor)
+            // Apply BEFORE the count probe: an update replaces its row
+            // without changing the count, so a mismatch after the write
+            // isolates rows deleted server-side — the one change a
+            // timestamp cursor cannot see. Mismatch (or a failed probe)
+            // falls through to the full replace below, so removals converge
+            // within one refresh cycle. An edit that deletes and reinserts
+            // rows keeps the total count, so its ghost rows linger until
+            // the daily full replace.
+            await writeTable(spec, newRows, false)
+            const { count: serverCount, error: cntErr } = await supabaseRaw
+              .from(spec.table)
+              .select('id', { count: 'exact', head: true })
+            const localCount = await db.table(spec.store).count()
+            if (!cntErr && serverCount != null && serverCount === localCount) {
+              rows = newRows
+              replaceAll = false
+              applied = true
+            }
+          }
+        }
+        if (!applied) {
+          rows = await spec.fetch()
+          await writeTable(spec, rows, true)
+        }
+        if (spec.delta) {
+          // Advance the cursor to the newest timestamp seen. Rows sharing a
+          // timestamp (one transaction writes a whole batch) were all fetched
+          // together, so a strict-gt cursor never skips them.
+          const col = spec.cursorColumn ?? 'created_at'
+          const newCursor = rows.reduce<string | null>((m, r) => {
+            const ts = r[col]
+            return typeof ts === 'string' && ts && (!m || ts > m) ? ts : m
+          }, null)
+          if (newCursor) await setMeta(`replica:delta_cursor:${spec.name}`, newCursor)
+          if (replaceAll) await setMeta(`replica:last_full:${spec.name}`, Date.now())
+        }
         await setMeta(`replica:last_sync:${spec.name}`, Date.now())
-        await setMeta(`replica:count:${spec.name}`, rows.length)
+        await setMeta(
+          `replica:count:${spec.name}`,
+          replaceAll ? rows.length : await db.table(spec.store).count(),
+        )
         notifyReplicaChanged()
       } catch (err) {
         if (isNetworkError(err)) {
@@ -275,10 +364,18 @@ export async function startReplicator(): Promise<void> {
   const stale = !last || Date.now() - last > REPLICA_INTERVAL_MS
   if (stale) void replicateAll()
 
+  // A full refresh re-downloads every table (~19 MB today). Each tick that
+  // fires while the tab is hidden is pure waste — the replica only matters
+  // when someone is looking at the app — so background/hidden tabs skip the
+  // timer and reconnect ticks, and a refresh runs the moment the tab becomes
+  // visible again (the 1-minute guard collapses burst triggers).
   networkMonitor.subscribe((s) => {
-    if (s.online) void replicateAll()
+    if (s.online && !document.hidden) void replicateAll()
   })
   timer = setInterval(() => {
-    if (networkMonitor.getState().online) void replicateAll()
+    if (networkMonitor.getState().online && !document.hidden) void replicateAll()
   }, REPLICA_INTERVAL_MS)
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && networkMonitor.getState().online) void replicateAll()
+  })
 }
