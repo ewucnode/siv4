@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Search, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CircleCheck as CheckCircle2, X, Camera, UserPlus, Filter, Wallet, Maximize2, Minimize2, ArrowRight, ArrowLeft, Receipt, History, Eye, EyeOff, ImagePlus, Package, Check, Clock, DollarSign, ChevronUp, ChevronDown, ChevronRight, Layers, TriangleAlert as AlertTriangle, Printer, Zap } from 'lucide-react';
+import { Search, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CircleCheck as CheckCircle2, X, Camera, UserPlus, Filter, Wallet, Maximize2, Minimize2, ArrowRight, ArrowLeft, Receipt, History, Eye, EyeOff, ImagePlus, Package, Check, Clock, DollarSign, ChevronUp, ChevronDown, ChevronRight, RotateCcw, Layers, TriangleAlert as AlertTriangle, Printer, Zap } from 'lucide-react';
 import type { ProductUnit } from '@/lib/types';
 import { isMultiUnitEnabled, getDefaultSaleUnit, convertToBaseUnit } from '@/lib/unit-utils';
 import { fetchLedgerStockFor, computeShortfalls, shortfallDescription, type Shortfall } from '@/lib/oversell-gate';
@@ -1735,10 +1735,110 @@ export default function POSPage() {
   // Each checkout session is a fresh charge intent — a new idempotency key
   // per modal open. Must sit after the showCheckout declaration: the
   // dependency below evaluates during render.
+  const posRootRef = useRef<HTMLDivElement>(null);
+  const cartPanelRef = useRef<HTMLDivElement>(null);
+  const cartListRef = useRef<HTMLDivElement>(null);
+  const [cartHeightOverride, setCartHeightOverride] = useState<number | null>(null);
+  const [cartAutoGrow, setCartAutoGrow] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return sessionStorage.getItem('posCartAutoGrow') !== 'off';
+  });
+  const [cartListScrolled, setCartListScrolled] = useState(false);
+  const prevCartCount = useRef(0);
   useEffect(() => {
     if (showCheckout) chargeIntentIdRef.current = crypto.randomUUID();
   }, [showCheckout]);
-  const [showCartFooter, setShowCartFooter] = useState(true);
+  useEffect(() => {
+    const el = posRootRef.current;
+    const main = el?.parentElement;
+    if (!el || !main) return;
+    let raf = 0;
+    const apply = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        if (!window.matchMedia('(min-width: 1024px)').matches) {
+          el.style.removeProperty('--pos-h');
+          return;
+        }
+        const padTop = parseFloat(getComputedStyle(main).paddingTop) || 0;
+        const padBottom = parseFloat(getComputedStyle(main).paddingBottom) || 0;
+        const available = window.innerHeight - main.offsetTop - padTop - padBottom;
+        const h = Math.max(available, 320, cartHeightOverride ?? 0);
+        el.style.setProperty('--pos-h', `${h}px`);
+      });
+    };
+    apply();
+    window.addEventListener('resize', apply);
+    const ro = new ResizeObserver(apply);
+    ro.observe(main);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', apply);
+      ro.disconnect();
+      el.style.removeProperty('--pos-h');
+    };
+  }, [cartHeightOverride]);
+  useEffect(() => {
+    if (cart.length > prevCartCount.current) {
+      const el = cartListRef.current;
+      if (el) el.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    prevCartCount.current = cart.length;
+  }, [cart.length]);
+  useEffect(() => {
+    if (cart.length > prevCartCount.current) {
+      const el = cartListRef.current;
+      if (el) el.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    prevCartCount.current = cart.length;
+  }, [cart.length]);
+  const [showCartFooter, setShowCartFooter] = useState(false);
+  // Auto-grow: from 3 items the cart extends downward (the page grows with it)
+  // so every item stays visible; past 50 items growth stops and the list
+  // scrolls internally. "Reset size" in the cart header turns it off.
+  // The expanded footer always gets room: the panel grows downward so the list
+  // (and the toggle the user just clicked) never shifts.
+  useEffect(() => {
+    if (cart.length > 50 && !showCartFooter) return; // freeze at the 50-item height
+    const itemGrow = cartAutoGrow && cart.length >= 3;
+    if (!showCartFooter && !itemGrow) {
+      setCartHeightOverride(null);
+      return;
+    }
+    let raf = requestAnimationFrame(() => {
+      const root = posRootRef.current;
+      const panel = cartPanelRef.current;
+      const list = cartListRef.current;
+      if (!root || !panel || !list) return;
+      // The cart already fills the column by default; only grow the page when
+      // the content is taller than that column.
+      const main = root.parentElement;
+      const padTop = main ? parseFloat(getComputedStyle(main).paddingTop) || 0 : 0;
+      const padBottom = main ? parseFloat(getComputedStyle(main).paddingBottom) || 0 : 0;
+      const avail = main ? window.innerHeight - main.offsetTop - padTop - padBottom : window.innerHeight;
+      // Natural content height of the list. `list.scrollHeight` cannot be
+      // used when the panel is taller than its content (e.g. right after
+      // closing the footer): a stretched list reports its stretched height,
+      // pinning the panel at the expanded size and leaving a large gap.
+      // Span from the first real item to the last instead (scroll-safe; the
+      // sticky fade overlay is excluded).
+      const cs = getComputedStyle(list);
+      const listPad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+      const items = Array.from(list.children).filter((c) => {
+        const p = getComputedStyle(c).position;
+        return p !== 'sticky' && p !== 'absolute';
+      }) as HTMLElement[];
+      const natural = items.length
+        ? listPad + (items[items.length - 1].getBoundingClientRect().bottom - items[0].getBoundingClientRect().top)
+        : list.scrollHeight;
+      const desired = panel.offsetHeight - list.offsetHeight + Math.ceil(natural);
+      setCartHeightOverride(desired > avail ? desired : null);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [cart.length, cartAutoGrow, showCartFooter, cartMaximized]);
+  useEffect(() => {
+    sessionStorage.setItem('posCartAutoGrow', cartAutoGrow ? 'on' : 'off');
+  }, [cartAutoGrow]);
   const [defaultProductImage, setDefaultProductImage] = useState('');
   const [showImageModal, setShowImageModal] = useState(false);
   const [imageModalProduct, setImageModalProduct] = useState<ProductData | null>(null);
@@ -1758,7 +1858,7 @@ export default function POSPage() {
   }, [customerDropdownOpen]);
 
   return (
-    <div className="flex flex-col lg:flex-row lg:h-[calc(100vh-104px)] gap-4 animate-fade-in">
+    <div ref={posRootRef} className="flex flex-col lg:flex-row lg:h-[var(--pos-h,calc(100dvh_-_104px))] transition-[height] duration-300 ease-out gap-4 animate-fade-in">
       {/* Mobile Cart Overlay */}
       {showMobileCart && (
         <div
@@ -2112,16 +2212,19 @@ export default function POSPage() {
       </div>
 
       {/* Cart - Desktop Side Panel / Mobile Bottom Drawer / Maximized Overlay */}
-      <div className={`
+      <div
+        ref={cartPanelRef}
+        style={cartHeightOverride != null && !cartMaximized ? ({ '--cart-ovh': `${cartHeightOverride}px` } as CSSProperties) : undefined}
+        className={`
         ${cartMaximized ? 'fixed inset-0 z-[100]' : 'fixed lg:relative inset-x-0 bottom-0 lg:inset-auto'}
         ${cartMaximized ? 'w-full h-full lg:w-full lg:h-full' : 'lg:w-[420px]'}
         flex flex-col bg-white
         ${cartMaximized ? 'rounded-none lg:rounded-none' : 'rounded-t-3xl lg:rounded-2xl'}
         border border-border shadow-sm overflow-hidden relative
         z-50
-        transition-transform duration-300 ease-out lg:transition-none
+        transition-transform duration-300 ease-out lg:transition-[height]
         ${showMobileCart || cartMaximized ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'}
-        ${cartMaximized ? '' : 'h-[85vh] lg:h-auto lg:max-h-none'}
+        ${cartMaximized ? '' : 'h-[85vh] lg:h-[var(--cart-ovh,100%)]'}
       `}>
         {/* Drag handle for mobile */}
         <div className="flex justify-center pt-2 pb-1 lg:hidden">
@@ -2133,6 +2236,16 @@ export default function POSPage() {
             <ShoppingCart className="w-4 h-4" />Cart ({cart.length})
           </h2>
           <div className="flex items-center gap-2">
+            {cart.length >= 3 && !cartMaximized && (
+              <button
+                onClick={() => setCartAutoGrow(v => !v)}
+                className="hidden lg:flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition"
+                title={cartAutoGrow ? 'Stop auto-growing — the cart scrolls within the screen again' : 'Let the cart grow downward with items (up to 50)'}
+              >
+                <RotateCcw className="w-3 h-3" />
+                {cartAutoGrow ? 'Reset size' : 'Auto-grow'}
+              </button>
+            )}
             {cart.length > 0 && (
               <button onClick={() => setCart([])} className="text-xs text-red-500 hover:underline">Clear</button>
             )}
@@ -2170,7 +2283,15 @@ export default function POSPage() {
           </div>
         )}
 
-        <div className={`flex-1 overflow-y-auto p-3 space-y-2 ${cartMaximized ? 'lg:max-w-4xl lg:mx-auto lg:w-full' : ''}`}>
+        <div
+          ref={cartListRef}
+          onScroll={e => setCartListScrolled(e.currentTarget.scrollTop > 4)}
+          className={`grow shrink min-h-0 overflow-y-auto p-3 space-y-2 ${cartMaximized ? 'lg:max-w-4xl lg:mx-auto lg:w-full' : ''}`}
+        >
+          <div
+            className="sticky top-0 -mb-6 h-6 z-10 pointer-events-none bg-gradient-to-b from-white to-transparent transition-opacity"
+            style={{ opacity: cartListScrolled ? 1 : 0 }}
+          />
           {cart.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-center py-12">
               <div>
@@ -2381,7 +2502,65 @@ export default function POSPage() {
           <div className="border-t border-border">
             {/* Collapse toggle */}
             <button
-              onClick={() => setShowCartFooter(p => !p)}
+              onClick={(e) => {
+                // The toggle must stay put on screen: the cart grows for the
+                // footer, so afterwards scroll the page by whatever the
+                // button drifted, keeping the user's view anchored here.
+                const btn = e.currentTarget;
+                const startTop = btn.getBoundingClientRect().top;
+                // The ERP layout scrolls inside <main>, not the window.
+                const scroller = posRootRef.current?.parentElement;
+                setShowCartFooter(p => !p);
+                // The panel settles over several frames (footer renders first,
+                // then the auto-grow override lands), so keep re-correcting
+                // every frame until the height is stable and the drift is 0.
+                // Any user scroll/hinput cancels the correction immediately —
+                // otherwise this loop would undo the user's own scrolling.
+                let lastH = -1;
+                let calm = 0;
+                let frames = 0;
+                let done = false;
+                const stop = () => { done = true; };
+                const stopOpts: AddEventListenerOptions = { capture: true, passive: true };
+                window.addEventListener('wheel', stop, stopOpts);
+                window.addEventListener('touchstart', stop, stopOpts);
+                window.addEventListener('keydown', stop, { capture: true });
+                const cleanup = () => {
+                  window.removeEventListener('wheel', stop, stopOpts);
+                  window.removeEventListener('touchstart', stop, stopOpts);
+                  window.removeEventListener('keydown', stop, { capture: true });
+                };
+                const tick = () => {
+                  if (done || ++frames > 180) { cleanup(); return; }
+                  const h = cartPanelRef.current?.offsetHeight ?? -1;
+                  const dy = Math.round(btn.getBoundingClientRect().top - startTop);
+                  if (Math.abs(dy) > 1) {
+                    // Scroll the document first — it holds the overflow
+                    // created by the page growing. <main> is the scroller
+                    // only when the layout constrains it, and feeding it
+                    // first can starve the document mid-animation: <main>
+                    // stays "scrollable" but saturated, so the drift would
+                    // lag behind the panel's height transition.
+                    const se = document.scrollingElement;
+                    let applied = 0;
+                    if (se) {
+                      const before = se.scrollTop;
+                      se.scrollTop = before + dy;
+                      applied = se.scrollTop - before;
+                    }
+                    const rest = dy - applied;
+                    if (Math.abs(rest) > 0 && scroller && scroller.scrollHeight > scroller.clientHeight + 1) scroller.scrollTop += rest;
+                    calm = 0;
+                  } else {
+                    calm++;
+                  }
+                  const settled = h === lastH && calm > 10;
+                  lastH = h;
+                  if (settled) { cleanup(); return; }
+                  requestAnimationFrame(tick);
+                };
+                requestAnimationFrame(tick);
+              }}
               className="w-full flex items-center justify-between px-3 py-2 border border-blue-200 bg-blue-50/60 text-blue-600 hover:bg-blue-100/60 transition text-xs font-medium"
             >
               <span className="flex items-center gap-1.5">
