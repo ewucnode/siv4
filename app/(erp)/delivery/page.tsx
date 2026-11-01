@@ -9,6 +9,8 @@ import { networkMonitor } from '@/lib/offline/network';
 import { enqueueOp } from '@/lib/offline/outbox';
 import { Plus, Search, MapPin, Clock, CircleCheck as CheckCircle2, Circle as XCircle, Package, Truck, X, CreditCard as Edit, Printer, FileText, Filter, ChevronDown } from 'lucide-react';
 import DeliveryChallan from '@/components/DeliveryChallan';
+import { loadChallanItems } from '@/lib/challan-items';
+import { planDeliveryItemSync, fetchInvoiceLinesForDelivery } from '@/lib/delivery-item-sync';
 import type { Delivery, DeliveryStatus, Customer } from '@/lib/types';
 import Pagination from '@/components/ui/AppPagination';
 import { printNode } from '@/lib/print';
@@ -98,37 +100,24 @@ export default function DeliveryPage() {
     setChallanLoading(true);
     setChallanItems([]);
 
-    if (delivery.invoice_id) {
-      const { data: invItems } = await supabase
-        .from('invoice_items')
-        .select('quantity, unit_name, product:products(name, sku, unit)')
-        .eq('invoice_id', delivery.invoice_id);
+    // The list this row came from is cached for 60s, so an invoice edit can
+    // leave the header (invoice no., edited stamp) behind. Re-read the row for
+    // the print, then take the linked invoice's CURRENT lines — a challan
+    // re-printed after an edit must show the edited invoice.
+    const { data: fresh } = await supabase
+      .from('deliveries')
+      .select('*, customer:customers(name, phone, address), invoice:invoices(invoice_number)')
+      .eq('id', delivery.id)
+      .maybeSingle();
+    const row = (fresh as DeliveryWithCustomer | null) ?? delivery;
+    if (fresh) setChallanDelivery(row);
 
-      if (invItems && invItems.length > 0) {
-        setChallanItems(invItems.map((item: any) => ({
-          product_name: item.product?.name || '—',
-          product_sku: item.product?.sku,
-          quantity: Number(item.quantity),
-          delivered_quantity: Number(item.quantity),
-          unit_name: item.unit_name || item.product?.unit || null,
-        })));
-      }
-    } else {
-      const { data: delItems } = await supabase
-        .from('delivery_items')
-        .select('quantity, delivered_quantity, unit_name, product:products(name, sku, unit)')
-        .eq('delivery_id', delivery.id);
-
-      if (delItems && delItems.length > 0) {
-        setChallanItems(delItems.map((item: any) => ({
-          product_name: item.product?.name || '—',
-          product_sku: item.product?.sku,
-          quantity: Number(item.quantity),
-          delivered_quantity: Number(item.delivered_quantity ?? item.quantity),
-          unit_name: item.unit_name || item.product?.unit || null,
-        })));
-      }
-    }
+    const items = await loadChallanItems({
+      id: row.id,
+      invoice_id: row.invoice_id,
+      status: row.status,
+    });
+    setChallanItems(items);
     setChallanLoading(false);
   }
 
@@ -487,10 +476,31 @@ function DeliveryModal({ customers, invoices, delivery, onClose, onSaved }: {
     // create and copies invoice items to delivery_items server-side.
     if (!networkMonitor.getState().online) {
       try {
+        // Lines to copy onto the challan ride in the queued payload, so the
+        // pending overlay can render them and an offline re-link is not lost.
+        // The read is served by the cache/replica when there is no connection.
+        const linkChanged = isEdit && (form.invoice_id || null) !== (delivery?.invoice_id ?? null);
+        const copyLines = form.invoice_id && (!isEdit || linkChanged)
+          ? await fetchInvoiceLinesForDelivery(form.invoice_id)
+          : [];
+        // On a re-link the superseded rows are named explicitly: the overlay can
+        // only hide replica rows by id, and without that an offline re-link
+        // showed the old and new line sets side by side.
+        const replacedItemIds = linkChanged
+          ? ((await supabase.from('delivery_items').select('id').eq('delivery_id', delivery!.id))
+              .data as { id: string }[] | null ?? []).map((r) => r.id)
+          : [];
         if (isEdit) {
           await enqueueOp('delivery.update', {
             idempotency_key: crypto.randomUUID(),
             id: delivery!.id,
+            // The link is part of an edit — dropping it here used to make an
+            // offline re-link vanish without a trace. `items` is present ONLY
+            // on a re-link: the overlay treats it as "replace the challan's
+            // rows", so sending it on a plain edit would blank them.
+            invoice_id: form.invoice_id || null,
+            customer_id: form.customer_id || null,
+            ...(linkChanged ? { items: copyLines, removed_item_ids: replacedItemIds } : {}),
             delivery_date: form.delivery_date || null,
             delivery_address: form.delivery_address || null,
             delivery_city: form.delivery_city || null,
@@ -507,6 +517,7 @@ function DeliveryModal({ customers, invoices, delivery, onClose, onSaved }: {
             temp_number: tempNumber,
             customer_id: form.customer_id || null,
             invoice_id: form.invoice_id || null,
+            items: copyLines,
             delivery_date: form.delivery_date || null,
             delivery_address: form.delivery_address || null,
             delivery_city: form.delivery_city || null,
@@ -546,25 +557,46 @@ function DeliveryModal({ customers, invoices, delivery, onClose, onSaved }: {
 
     if (error) { setError(error.message); setSaving(false); return; }
 
-    // If linked to an invoice, copy invoice items to delivery_items
+    // Copy the linked invoice's lines into delivery_items. Never append on a
+    // plain re-save — that doubled every line on the challan. See
+    // lib/delivery-item-sync.ts for the rule.
     if (form.invoice_id && savedData && savedData[0]) {
       const deliveryId = savedData[0].id;
-      const { data: invItems } = await supabase
-        .from('invoice_items')
-        .select('product_id, quantity, unit_name')
-        .eq('invoice_id', form.invoice_id);
 
-      if (invItems && invItems.length > 0) {
-        const delItems = invItems.map((item: any) => ({
-          delivery_id: deliveryId,
-          product_id: item.product_id,
-          quantity: Number(item.quantity),
-          delivered_quantity: Number(item.quantity),
-          unit_name: item.unit_name,
-        }));
-        const { error: delItemsError } = await supabase.from('delivery_items').insert(delItems);
-        if (delItemsError) {
-          toast({ title: 'Warning', description: 'Delivery created but items could not be copied: ' + delItemsError.message, variant: 'destructive' });
+      const { data: existingRows } = isEdit
+        ? await supabase.from('delivery_items').select('id').eq('delivery_id', deliveryId)
+        : { data: null };
+      const existingIds = ((existingRows as { id: string }[] | null) ?? []).map((r) => r.id);
+
+      const action = planDeliveryItemSync({
+        isEdit,
+        invoiceId: form.invoice_id,
+        previousInvoiceId: delivery?.invoice_id ?? null,
+        existingRowCount: existingIds.length,
+      });
+
+      if (action !== 'skip') {
+        const lines = await fetchInvoiceLinesForDelivery(form.invoice_id);
+
+        if (lines.length > 0) {
+          const delItems = lines.map((line) => ({
+            delivery_id: deliveryId,
+            product_id: line.product_id,
+            quantity: line.quantity,
+            delivered_quantity: line.quantity,
+            unit_name: line.unit_name,
+          }));
+          const { error: delItemsError } = await supabase.from('delivery_items').insert(delItems);
+          if (delItemsError) {
+            toast({ title: 'Warning', description: 'Delivery saved but its items could not be copied: ' + delItemsError.message, variant: 'destructive' });
+          } else if (action === 'replace' && existingIds.length > 0) {
+            // Insert first, then drop the replaced rows: a failed insert must
+            // not leave the challan with no lines at all.
+            const { error: clearError } = await supabase.from('delivery_items').delete().in('id', existingIds);
+            if (clearError) {
+              toast({ title: 'Warning', description: 'Old challan lines could not be removed: ' + clearError.message, variant: 'destructive' });
+            }
+          }
         }
       }
     }
