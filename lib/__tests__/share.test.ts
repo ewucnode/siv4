@@ -1,4 +1,4 @@
-import { normalizeWhatsAppPhone } from '../share';
+import { normalizeWhatsAppPhone, sharePdfFile } from '../share';
 
 describe('normalizeWhatsAppPhone', () => {
   test('converts local BD numbers with trunk zero to international format', () => {
@@ -34,5 +34,33 @@ describe('normalizeWhatsAppPhone', () => {
 
   test('respects a custom country code', () => {
     expect(normalizeWhatsAppPhone('09123456789', '91')).toBe('919123456789');
+  });
+});
+
+describe('sharePdfFile', () => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+
+  function stubNavigator(value: unknown) {
+    Object.defineProperty(globalThis, 'navigator', { value, configurable: true, writable: true });
+  }
+
+  afterEach(() => {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+  });
+
+  test('shares the PDF on its own, with no text or title attached', async () => {
+    // WhatsApp renders any accompanying text as a separate chat message, so the
+    // share payload must carry the file and nothing else.
+    const share = jest.fn().mockResolvedValue(undefined);
+    stubNavigator({ share, canShare: () => true });
+
+    const file = new File(['%PDF-1.4'], 'INVOICE-0001.pdf', { type: 'application/pdf' });
+    await expect(sharePdfFile(file)).resolves.toBe('shared');
+
+    expect(share).toHaveBeenCalledTimes(1);
+    const payload = share.mock.calls[0][0];
+    expect(Object.keys(payload)).toEqual(['files']);
+    expect(payload.text).toBeUndefined();
+    expect(payload.title).toBeUndefined();
   });
 });

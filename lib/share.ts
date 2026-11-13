@@ -23,12 +23,12 @@ export function normalizeWhatsAppPhone(phone: string | null | undefined, country
   return digits;
 }
 
-export function openWhatsApp(phone: string | null | undefined, text: string, countryCode?: string) {
+export function openWhatsApp(phone: string | null | undefined, text?: string, countryCode?: string) {
   const normalized = normalizeWhatsAppPhone(phone, countryCode);
-  const encoded = encodeURIComponent(text);
-  const url = normalized
-    ? `https://wa.me/${normalized}?text=${encoded}`
-    : `https://wa.me/?text=${encoded}`;
+  // Only add the prefilled-message param when there is actually text; an empty
+  // `?text=` makes WhatsApp open the composer with a blank draft.
+  const query = text && text.trim() ? `?text=${encodeURIComponent(text)}` : '';
+  const url = normalized ? `https://wa.me/${normalized}${query}` : `https://wa.me/${query}`;
   window.open(url, '_blank');
 }
 
@@ -53,14 +53,20 @@ export type PdfShareResult = 'shared' | 'downloaded';
  * Hand the PDF to the OS share sheet (WhatsApp, Mail, etc.) when the browser
  * supports file sharing; otherwise download it so the user can attach it
  * manually.
+ *
+ * The file is shared on its own — no `text` and no `title`. Android share
+ * targets such as WhatsApp treat those extra fields as a caption/message, so
+ * passing the document summary here results in a separate text message landing
+ * in the chat next to the PDF. The document details already live inside the
+ * PDF itself, so only the attachment should be sent.
  */
-export async function sharePdfFile(file: File, text: string): Promise<PdfShareResult> {
+export async function sharePdfFile(file: File): Promise<PdfShareResult> {
   const nav = navigator as Navigator & {
     canShare?: (data: { files?: File[] }) => boolean;
-    share?: (data: { files?: File[]; text?: string; title?: string }) => Promise<void>;
+    share?: (data: { files?: File[] }) => Promise<void>;
   };
   if (nav.share && nav.canShare?.({ files: [file] })) {
-    await nav.share({ files: [file], text, title: file.name });
+    await nav.share({ files: [file] });
     return 'shared';
   }
   downloadFile(file);
