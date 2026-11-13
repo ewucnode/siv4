@@ -2735,9 +2735,11 @@ function ViewQuotationModal({ quotation, items, onClose, onConvert, onEdit, onDe
       );
       const text = buildShareText();
       if (target === 'whatsapp') {
-        const result = await sharePdfFile(file, text);
+        // Share the PDF only — WhatsApp turns any accompanying text into a
+        // separate chat message, and the details are already on the PDF.
+        const result = await sharePdfFile(file);
         if (result === 'downloaded') {
-          openWhatsApp((quotation.customer as any)?.phone, text);
+          openWhatsApp((quotation.customer as any)?.phone);
           toast({ title: 'PDF downloaded', description: 'Attach it in the WhatsApp chat that just opened.' });
         }
       } else {
